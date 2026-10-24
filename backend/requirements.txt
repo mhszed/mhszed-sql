@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+httpx
+beautifulsoup4
+lxml
+fpdf2
+cryptography

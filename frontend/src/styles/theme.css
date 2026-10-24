@@ -1,0 +1,107 @@
+/* ============ 深色主题全局样式 ============ */
+/* 基于 Element Plus dark 变量（html.dark），叠加品牌色与布局微调 */
+
+:root {
+  --brand: #4f8cff;
+  --brand-dim: #2c5fb8;
+  --accent: #e2366a;
+  --grad: linear-gradient(90deg, #4f8cff, #e2366a);
+  --brand-soft: rgba(79, 140, 255, .12);
+  --accent-soft: rgba(226, 54, 106, .12);
+  --bg-page: #0d1117;
+  --bg-panel: #161b22;
+  --border-dim: #30363d;
+  --text-dim: #9da7b3;
+  /* 比纯白柔一档的主文字色；标题、表头、卡片标题统一使用 */
+  --text-main: #c9d1d9;
+}
+
+html.dark {
+  color-scheme: dark;
+  --el-color-primary: #4f8cff;
+  /* 功能性危险色保持可读的亮绯红；装饰性深绯红用 --accent */
+  --el-color-danger: #ff6b8a;
+  --el-color-error: #ff6b8a;
+  --el-text-color-primary: #c9d1d9;
+  --el-text-color-regular: #c9d1d9;
+  --el-border-radius-base: 7px;
+}
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-page);
+  color: var(--text-main);
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+/* 侧边菜单 */
+.el-aside {
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-dim);
+}
+
+/* 主内容区 */
+.page-wrap {
+  padding: 16px 20px 28px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.page-title {
+  position: relative;
+  padding-left: 12px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  color: var(--text-main);
+  margin: 0 0 14px;
+}
+.page-title::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 16px;
+  margin-top: -8px;
+  border-radius: 2px;
+  background: var(--grad);
+}
+
+/* 面板卡片 */
+.panel-card {
+  position: relative;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .28);
+}
+
+/* 日志/JSON 展示区 */
+.log-view {
+  background:
+    linear-gradient(180deg, rgba(79, 140, 255, .045), transparent 35%),
+    #0a0e14;
+  border: 1px solid var(--border-dim);
+  border-left: 2px solid rgba(79, 140, 255, .38);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: Consolas, "Cascadia Code", monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #c9d1d9;
+  overflow: auto;
+  max-height: 420px;
+}
+
+/* 单元格省略 */
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

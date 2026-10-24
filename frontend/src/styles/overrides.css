@@ -1,0 +1,146 @@
+/* ============ Element Plus 深色细节覆写 ============ */
+
+/* 表格 */
+.el-table {
+  --el-table-bg-color: var(--bg-panel);
+  --el-table-tr-bg-color: var(--bg-panel);
+  --el-table-header-bg-color: #1c2129;
+  --el-table-border-color: var(--border-dim);
+  --el-table-row-hover-bg-color: #1f2630;
+}
+.el-table th.el-table__cell {
+  font-weight: 600;
+  letter-spacing: .2px;
+  color: #c9d1d9;
+  border-bottom: 1px solid rgba(79, 140, 255, .22) !important;
+}
+.el-table .el-table__row { transition: background .15s; }
+.el-table .el-table__cell { font-weight: 500; }
+
+/* 对话框与卡片 */
+.el-dialog, .el-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+}
+.el-dialog {
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .55);
+}
+.el-dialog__header {
+  margin-right: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-dim);
+}
+.el-drawer__header {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-dim);
+}
+.el-button { border-radius: 7px; font-weight: 600; }
+/* 主按钮保持品牌蓝实心（和默认/次要按钮形成层级），但底色压深保证白字可读 */
+.el-button--primary {
+  background-color: #3a6dd8;
+  background-image: linear-gradient(135deg, #3f74e0, #345fc0);
+  border-color: transparent;
+  color: #c9d1d9;
+}
+.el-button--primary:hover {
+  background-color: #3a6dd8;
+  background-image: linear-gradient(135deg, #3f74e0, #345fc0);
+  border-color: transparent;
+  color: #c9d1d9;
+  filter: brightness(1.08);
+}
+.el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: linear-gradient(135deg, #3f74e0, #345fc0) !important;
+  border-color: transparent !important;
+  color: #c9d1d9 !important;
+  box-shadow: none !important;
+}
+.el-pagination.is-background .el-pager li.is-active {
+  background: linear-gradient(135deg, #3f74e0, #345fc0);
+  border: 1px solid transparent;
+  color: #c9d1d9;
+}
+.el-input__wrapper { border-radius: 7px; }
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--brand), 0 0 0 4px rgba(79, 140, 255, .12);
+}
+/* 标签统一用近白文字 + 语义底色，和“确认”按钮的清晰度保持一致 */
+.el-tag,
+.el-tag.el-tag--primary {
+  --el-tag-bg-color: rgba(79, 140, 255, .20);
+  --el-tag-text-color: #c9d1d9;
+  --el-tag-border-color: transparent;
+  border-radius: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.el-tag.el-tag--success {
+  --el-tag-bg-color: rgba(103, 194, 58, .22);
+  --el-tag-text-color: #c9d1d9;
+}
+.el-tag.el-tag--warning {
+  --el-tag-bg-color: rgba(230, 162, 60, .22);
+  --el-tag-text-color: #c9d1d9;
+}
+.el-tag.el-tag--danger {
+  --el-tag-bg-color: rgba(255, 107, 138, .22);
+  --el-tag-text-color: #c9d1d9;
+}
+.el-tag.el-tag--info {
+  --el-tag-bg-color: rgba(139, 148, 158, .20);
+  --el-tag-text-color: #c9d1d9;
+}
+/* 文字按钮/描边按钮统一成证据区同款近白字，不再用偏淡的浅蓝 */
+.el-button--primary.is-text,
+.el-button--primary.is-link,
+.el-button--primary.is-plain {
+  color: #e6edf3;
+  font-weight: 600;
+}
+.el-button--primary.is-text:hover,
+.el-button--primary.is-link:hover,
+.el-button--primary.is-plain:hover {
+  color: #fff;
+}
+.el-button--danger.is-text,
+.el-button--danger.is-link,
+.el-button--danger.is-plain {
+  color: #ff9ab5;
+}
+.el-button--small { font-size: 13px; }
+.el-tabs__active-bar { background: var(--grad); }
+.el-tabs__item.is-active { color: #8ab4ff; }
+.el-pagination .el-pager li.is-active { color: var(--brand); font-weight: 600; }
+.el-pagination.is-background .el-pager li.is-active {
+  background: linear-gradient(135deg, #4f8cff, #5a76ff);
+}
+.el-message { border-left: 2px solid var(--brand); }
+
+/* 消息与通知贴深色 */
+.el-message {
+  border: 1px solid var(--border-dim);
+}
+
+/* 表单标签稍暗 */
+.el-form-item__label {
+  color: var(--text-dim);
+}
+
+/* 分页器背景透明 */
+.el-pagination {
+  background: transparent;
+  --el-pagination-bg-color: transparent;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+/* 状态标签微调 */
+.el-tag { border: none; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: #2d333b; border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: #3c444d; }
+::-webkit-scrollbar-track { background: transparent; }

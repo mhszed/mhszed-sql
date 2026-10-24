@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+backend/venv/
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# 密钥 / 环境变量
+.env
+.env.*
+*.key
+secret.key
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 临时产物
+_*.txt
+*.log
+
+# 内部开发台账（含靶场目标情报，不入公开仓库）
+DEVELOPMENT-PROGRESS.md
