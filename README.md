@@ -45,27 +45,29 @@ tools/sqlmap/       随项目分发的 SQLMap（GPLv2，版权归原作者）
 
 | 依赖 | 版本 / 说明 |
 |---|---|
-| 操作系统 | Windows 10/11（`setup.bat` / `start.bat`）；Linux/macOS 可按下方手动命令运行 |
+| 操作系统 | Windows 10/11（双击 `启动mhszed-sql.bat` 或 `start.bat` 即用）；Linux/macOS 可按下方手动命令运行 |
 | Python | **3.10+**（实测 3.13.2），需加入 PATH |
 | Node.js | **18+**（实测 24.14.0），自带 npm |
-| 端口 | `8787`（后端）、`5173`（前端）需空闲 |
+| 端口 | `8787`（后端）、`5173`（前端）需空闲；被占用时启动器会提示 |
 | SQLMap | 已随项目附带 `tools/sqlmap`，**无需单独安装** |
 | 浏览器 | Chrome / Edge（前端为 Vue 3 SPA） |
 
-> Windows 下首次运行必须先执行 `setup.bat`（创建虚拟环境 + 安装后端/前端依赖），
-> 之后再运行 `start.bat`。直接运行 `start.bat` 会提示缺少依赖。
+> Windows 首次运行会**自动**创建虚拟环境并安装后端/前端依赖（需要联网，通常几分钟），
+> 之后每次双击即可直接启动，无需再手动执行 `setup.bat`。
 
-## 快速开始（Windows）
+## 快速开始（Windows，一键启动）
 
-```bat
-:: 首次运行：初始化环境（只需一次）
-setup.bat
+1. 确认已安装 **Python 3.10+** 和 **Node.js 18+**，并已加入 PATH。
+2. **先解压**下载的压缩包（不要在压缩包内直接双击）。
+3. 双击 **`启动mhszed-sql.bat`**（或 `start.bat`）。
 
-:: 启动后端 + 前端并自动打开浏览器
-start.bat
-```
+首次运行会自动完成环境初始化并安装依赖；之后每次双击直接启动。
+启动完成后会自动打开 http://localhost:5173，默认账号 **admin / admin123**。
 
-打开 http://localhost:5173，默认账号 **admin / admin123**。
+> - 停止服务：关闭 “mhszed-sql backend 8787” 与 “mhszed-sql frontend 5173” 两个控制台窗口。
+> - 端口被占用时启动器会明确提示，不会强杀其他程序。
+> - 在命令行中运行时请用 `.\start.bat`（避免系统禁止从当前目录直接执行脚本）。
+> - 只需要初始化环境时，可单独运行 `.\setup.bat`。
 
 ## 手动启动（Linux / macOS / 自定义环境）
 
