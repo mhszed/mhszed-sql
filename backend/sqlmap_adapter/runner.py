@@ -160,7 +160,7 @@ _ALLOWED_EXTRA = {
 }
 
 # --tamper 值白名单：只允许项目自带/确认安全的脚本，杜绝任意 py 加载。
-_ALLOWED_TAMPERS = {"space2slash", "space2comment", "doublekeywords", "orand"}
+_ALLOWED_TAMPERS = {"space2slash", "space2comment", "doublekeywords", "orand", "and2amp"}
 
 
 # ---- `--dbms` 值归一（2026-10-15 Less-12 深入利用实测）----
@@ -305,7 +305,9 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
                extra_args: list[str] | None = None,
                exploit_mode: bool = False,
                dbms_hint: str | None = None,
-               out_dir_key: str | None = None) -> dict:
+               out_dir_key: str | None = None,
+               cookie: str | None = None,
+               headers: str | None = None) -> dict:
     """执行一次 SQLMap 扫描/利用。返回 {status, result_class, dbms, output_tail, ...}。
 
     exploit_mode=True：已知可注，追加白名单 extra_args（--dbs/--tables/--dump…），
@@ -331,6 +333,12 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
         args += ["--method", method.upper(), "--data", data]
     if param:
         args += ["-p", param]
+    # Challenge/登录态靶场：必须把采集/探测阶段的会话 Cookie 带给 sqlmap，
+    # 否则 sqlmap 看到的页面不是可注入状态（Less-57/61 实测多轮 error）。
+    if cookie:
+        args += ["--cookie", cookie]
+    if headers:
+        args += ["--headers", headers]
     if exploit_mode:
         # 已知可注：仍带 level，避免启发式误判直接放弃。
         # 默认 B+E（布尔+报错）：旧写法只给 B，对**报错型靶点**（如 Less-12 `")`）

