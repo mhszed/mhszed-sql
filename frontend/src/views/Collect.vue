@@ -30,6 +30,9 @@
     <!-- 已选定任务：接口列表 + AI 研判 Tab -->
     <template v-else>
       <el-card class="panel-card" style="margin-bottom: 14px">
+        <el-alert v-if="retestState" type="warning" :closable="false" show-icon
+                  :title="`深入复测进行中（任务 #${taskId}）：${retestState}`"
+                  style="margin-bottom: 10px" />
         <div class="toolbar">
           <el-button text type="primary" @click="backToList">← 返回任务 URL 列表</el-button>
           <el-tag type="info">任务 #{{ taskId }}</el-tag>
@@ -131,8 +134,21 @@
           <el-table-column label="操作" width="235" fixed="right">
             <template #default="{ row }">
               <el-button size="small" text type="primary" @click="openJudgment(row)">判断</el-button>
-              <el-button size="small" text type="success" :loading="scanningId === row.id"
-                         @click="scanEndpoint(row)">扫描</el-button>
+              <el-dropdown trigger="click" @command="(cmd) => onScanCommand(row, cmd)">
+                <el-button size="small" text type="success"
+                           :loading="scanningId === row.id || deepScanningId === row.id">
+                  扫描 ▾
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="scan">普通扫描</el-dropdown-item>
+                    <el-dropdown-item command="deep"
+                                      :disabled="row.read_write !== 'write' || row.vuln_status === 'confirmed'">
+                      深入复测（risk≥2）
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
               <el-button size="small" text type="warning"
                          @click="addConfirmedPayload(row)">Payload</el-button>
               <el-button size="small" text type="danger" @click="removeEndpoint(row)">删除</el-button>
@@ -372,7 +388,7 @@ const VULN_TYPE_LABEL = {
   sql_injection_union: 'SQL注入·UNION注入',
 }
 function vulnTypeLabel(t) { return VULN_TYPE_LABEL[t] || t || '-' }
-const VULN_STATUS_LABEL = { pending_review: '待复核', confirmed: '已确认', false_positive: '误报' }
+const VULN_STATUS_LABEL = { pending_review: '待复核', confirmed: '已确认', false_positive: '误报', suspected: '疑似未确认' }
 function vulnStatusLabel(s) { return VULN_STATUS_LABEL[s] || s || '-' }
 function verdictIcon(v) {
   return { confirmed: '✓', detected: '✓', suspected: '!', not_found: '✓',
@@ -548,6 +564,54 @@ async function scanEndpoint(row) {
   }
 }
 
+// 写接口深度复测：SQLMap --risk=2，才会测试 INSERT/UPDATE 型注入。
+// 会真实执行写语句，必须先人工确认。
+function onScanCommand(row, cmd) {
+  if (cmd === 'deep') deepScanEndpoint(row)
+  else scanEndpoint(row)
+}
+
+const deepScanningId = ref(null)
+const retestState = ref('')
+let retestTimer = null
+
+// 复测期间轮询任务状态，让页面能看到「进行中 / 当前步骤」
+function startRetestPolling() {
+  clearInterval(retestTimer)
+  retestState.value = '已触发，等待扫描开始…'
+  retestTimer = setInterval(async () => {
+    try {
+      const { data } = await http.get(`/task/${taskId.value}`)
+      if (data.status === 'scanning' || data.status === 'collecting') {
+        retestState.value = data.progress?.current_step || '扫描中'
+      } else {
+        retestState.value = ''
+        clearInterval(retestTimer)
+      }
+    } catch {
+      retestState.value = ''
+      clearInterval(retestTimer)
+    }
+  }, 5000)
+}
+
+async function deepScanEndpoint(row) {
+  try {
+    await ElMessageBox.confirm(
+      `对 ${row.method} ${fullUrl(row)} 启用「写接口深度注入测试」(SQLMap risk=2)？\n\n` +
+      '会真实执行 INSERT/UPDATE 语句，可能修改目标数据。仅限靶场或已授权且数据可牺牲的目标。',
+      '深入复测', { type: 'warning', confirmButtonText: '确认复测', cancelButtonText: '取消' })
+  } catch { return }
+  deepScanningId.value = row.id
+  try {
+    await http.post(`/collect/endpoints/${row.id}/scan?write_deep_probe=true`)
+    ElMessage.success(`已开始深入复测（risk≥2）接口 #${row.id}`)
+    startRetestPolling()
+  } catch { /* interceptor */ } finally {
+    deepScanningId.value = null
+  }
+}
+
 async function removeEndpoint(row) {
   try {
     await ElMessageBox.confirm(
@@ -619,7 +683,7 @@ onMounted(async () => {
   loadBurp()
   burpTimer = setInterval(loadBurp, 15000)
 })
-onBeforeUnmount(() => clearInterval(burpTimer))
+onBeforeUnmount(() => { clearInterval(burpTimer); clearInterval(retestTimer) })
 </script>
 
 <style scoped>

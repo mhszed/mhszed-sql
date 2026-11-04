@@ -43,6 +43,8 @@
                      @change="reload">
             <el-option label="待复核" value="pending_review" />
             <el-option label="已确认" value="confirmed" />
+            <el-option label="疑似未确认" value="suspected" />
+            <el-option label="探测超时" value="timeout" />
             <el-option label="误报" value="false_positive" />
           </el-select>
           <el-button :loading="downloading" @click="downloadReport">导出加固报告</el-button>
@@ -101,9 +103,17 @@
                          v-if="row.status === 'pending_review' || row.status === 'confirmed'"
                          :loading="deepLoadingId === row.id"
                          @click="openDeep(row)">深入利用</el-button>
-              <el-button size="small" type="primary" v-if="row.status === 'pending_review'"
+              <el-button size="small" type="primary"
+                         v-if="row.status === 'pending_review' || row.status === 'suspected'"
                          @click="reviewVuln(row, 'confirm')">确认</el-button>
-              <el-button size="small" type="danger" plain v-if="row.status === 'pending_review'"
+              <!-- 疑似/探测超时：一键深入复测（超时走轻量重测，疑似走写接口 risk≥2） -->
+              <el-button size="small" type="warning" plain
+                         v-if="row.status === 'suspected' || row.status === 'timeout'"
+                         :loading="deepRetestId === row.id"
+                         @click="deepRetest(row)">深入复测</el-button>
+              <!-- 默认已确认/疑似都允许人工标误报；探测超时不是漏洞，不提供误报 -->
+              <el-button size="small" type="danger" plain
+                         v-if="row.status !== 'false_positive' && row.status !== 'timeout'"
                          @click="reviewVuln(row, 'false_positive')">误报</el-button>
             </template>
           </el-table-column>
@@ -133,6 +143,9 @@
           </div>
           <div class="kf-item"><span class="dim">数据库类型</span>
             <div class="mono">{{ activeVuln.dbms || '未知' }}</div>
+          </div>
+          <div class="kf-item" v-if="deepStageLabel"><span class="dim">深挖状态</span>
+            <div>{{ deepStageLabel }}</div>
           </div>
         </div>
         <div v-if="payloadEvidence" class="payload-box">
@@ -199,11 +212,14 @@
         <el-radio value="enum" border>sqlmap 枚举库表（失败再 AI 兜底）</el-radio>
         <el-radio value="dump" border>脱裤样本（最多 5 行，需二次确认）</el-radio>
       </el-radio-group>
+      <el-checkbox v-model="deepBlind" style="margin-top: 10px">
+        盲注定向提取（默认关；开启才逐字符提取，耗时/请求较多，独立 180s 预算）
+      </el-checkbox>
       <div v-if="deepStatus" class="deep-status">
         <el-tag :type="deepStatus.status === 'error' ? 'danger' : deepStatus.status === 'done' ? 'success' : 'warning'" size="small">
           {{ deepStatus.status }}
         </el-tag>
-        <span class="mono small">{{ deepStatus.stage }}</span>
+        <span class="mono small">{{ stageLabel(deepStatus.stage) }}</span>
         <div class="dim small" style="margin-top: 6px">{{ deepStatus.summary }}</div>
         <div v-if="deepResultRows.length" class="deep-result">
           <div class="dim small">已获取结果</div>
@@ -262,6 +278,7 @@ const downloading = ref(false)
 const deepDlg = ref(false)
 const deepMode = ref('ai')
 const deepGoal = ref('')
+const deepBlind = ref(false)
 const deepRow = ref(null)
 const deepStarting = ref(false)
 const deepLoadingId = ref(null)
@@ -283,9 +300,24 @@ const payloadEvidence = computed(() => {
   }
   return [...rows].sort((a, b) => score(b) - score(a))[0].content || ''
 })
+// 漏洞详情里直接展示最新深挖状态（如“盲注跳过（未提取）”），不用点开深挖弹窗
+const deepStageLabel = computed(() => {
+  const rows = (evidence.value || []).filter(e => e.evidence_type === 'deep_exploit')
+  if (!rows.length) return ''
+  const latest = [...rows].sort((a, b) => (b.seq || 0) - (a.seq || 0))[0]
+  const s = String(latest.meta?.stage || '')
+  return s ? stageLabel(s) : ''
+})
+
 const deepSummary = computed(() => {
   const rows = (evidence.value || []).filter(e => e.evidence_type === 'deep_exploit')
   if (!rows.length) return ''
+  // 最新一条若是终态结论（盲注跳过/提取完成/预算/停止等），作为摘要的一行附加，
+  // 但不能冲掉数据库类型/Payload 等基础信息。
+  const latest = [...rows].sort((a, b) => (b.seq || 0) - (a.seq || 0))[0]
+  const FINAL_STAGES = new Set(['blind_skip', 'blind_extract',
+    'blind_extract_partial', 'blind_extract_fail', 'max_steps', 'budget',
+    'stop', 'result', 'dump_result', 'unreachable'])
   // 优先展示带真实成果的条目，避免被 “AI 0 命中” 之类的过程日志盖住
   const score = (ev) => {
     const c = ev.content || ''
@@ -385,6 +417,12 @@ const deepSummary = computed(() => {
   const payload = (payloadEvidence.value || '').split('\n')[0]
     .replace(/^\[[^\]]*\]\s*/, '').trim()
   const lines = []
+  const vt = activeVuln.value?.vuln_type
+  const VT_CN = {
+    sql_injection_time: '时间盲注', sql_injection_boolean: '布尔盲注',
+    sql_injection_union: 'UNION 注入', sql_injection_error: '报错注入',
+  }
+  if (vt) lines.push(`注入类型：${VT_CN[vt] || vt}`)
   if (dbms) lines.push(`数据库类型：${dbms}`)
   if (payload) lines.push(`确认 Payload：${payload}`)
   if (dbName) lines.push(`数据库名：${dbName}`)
@@ -394,6 +432,11 @@ const deepSummary = computed(() => {
   }
   if (tables.length) lines.push(`表：${tables.join(', ')}`)
   if (sample) lines.push(`数据样本/flag：${sample}`)
+  // 追加最新深挖结论（盲注先跑一次的结果/跳过原因），不覆盖上面的基础信息
+  if (latest && FINAL_STAGES.has(String(latest.meta?.stage || ''))) {
+    const txt = (latest.content || '').trim()
+    if (txt && !lines.some(l => l.includes(txt))) lines.push(txt)
+  }
   if (!lines.length) lines.push('尚未取得数据库名 / 表 / 数据样本')
   return lines.join('\n')
 })
@@ -510,6 +553,29 @@ async function openDetail(row) {
   drawer.value = true
 }
 
+const deepRetestId = ref(null)
+async function deepRetest(row) {
+  const isTimeout = row.status === 'timeout'
+  const tip = isTimeout
+    ? '将启用轻量重测：禁用时间盲注(--technique=BEU)、超时延长，不提升 risk。'
+    : '将启用写接口深度注入测试（SQLMap risk=2），会真实执行 INSERT/UPDATE 语句，' +
+      '可能修改目标数据。仅限靶场或已授权且数据可牺牲的目标。'
+  try {
+    await ElMessageBox.confirm(
+      `对 ${row.method} ${row.host}${row.path} 发起「深入复测」？\n\n${tip}`,
+      '深入复测', { type: 'warning', confirmButtonText: '确认复测', cancelButtonText: '取消' })
+  } catch { return }
+  deepRetestId.value = row.id
+  try {
+    const url = `/collect/endpoints/${row.endpoint_id}/scan`
+      + (isTimeout ? '' : '?write_deep_probe=true')
+    await http.post(url)
+    ElMessage.success(isTimeout ? '已开始轻量重测' : '已开始深入复测（risk≥2）')
+  } catch { /* interceptor */ } finally {
+    deepRetestId.value = null
+  }
+}
+
 async function reviewVuln(row, action) {
   if (action === 'false_positive') {
     await ElMessageBox.confirm('标记为误报？将回流负样本库压制后续同类研判。', '漏洞复核', { type: 'info' })
@@ -540,6 +606,7 @@ function openDeep(row) {
   deepRow.value = row
   deepMode.value = 'ai'
   deepGoal.value = ''
+  deepBlind.value = false
   deepStatus.value = null
   deepDlg.value = true
   pollDeepOnce(row.id)
@@ -563,6 +630,7 @@ async function startDeep() {
     const { data } = await http.post(`/vuln/${deepRow.value.id}/deep-exploit`, {
       mode: deepMode.value,
       goal: deepGoal.value,
+      blind_extract: deepBlind.value,
     })
     deepStatus.value = data.status
     ElMessage.success(
@@ -621,8 +689,23 @@ const TYPE_LABEL = { sql_injection_boolean: 'SQL注入·布尔盲注', sql_injec
 function typeLabel(t) { return TYPE_LABEL[t] || t }
 function sevLabel(s) { return { critical: '严重', high: '高危', medium: '中危', low: '低危' }[s] || s }
 function sevTag(s) { return { critical: 'danger', high: 'danger', medium: 'warning', low: 'info' }[s] || 'info' }
-function vstLabel(s) { return { pending_review: '待复核', confirmed: '已确认', false_positive: '误报' }[s] || s }
-function vstTag(s) { return { pending_review: 'warning', confirmed: 'danger', false_positive: 'info' }[s] || 'info' }
+function stageLabel(s) {
+  return {
+    blind_skip: '盲注跳过（未提取）',
+    blind_extract: '盲注提取',
+    blind_extract_partial: '盲注部分提取',
+    blind_extract_fail: '盲注提取失败',
+    max_steps: '达到步数上限',
+    budget: '预算用尽',
+    stop: '已完成',
+    starting: '启动中',
+    current_db: '取当前库名',
+    dbs: '枚举库',
+    union_extract: 'UNION 提取',
+  }[s] || s
+}
+function vstLabel(s) { return { pending_review: '待复核', confirmed: '已确认', false_positive: '误报', suspected: '疑似未确认', timeout: '探测超时' }[s] || s }
+function vstTag(s) { return { pending_review: 'warning', confirmed: 'danger', false_positive: 'info', suspected: 'info', timeout: 'info' }[s] || 'info' }
 function evType(t) { return { payload: 'danger', request: 'primary', waf_info: 'warning',
                              chain_info: 'info', console_log: 'info', response: 'success',
                              deep_exploit: 'warning' }[t] || 'info' }

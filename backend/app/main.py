@@ -12,9 +12,34 @@ from app.core.database import init_db
 from app.api import auth, task, collect, burp, settings, ai, kb, waf, scan, vuln, audit
 
 
+def _recover_stale_tasks():
+    """服务重启后复位"僵尸"任务。
+
+    进程被杀时后台线程终止，但 DB 里的 collecting/scanning 状态会残留，
+    再点定向复测就会报「非法状态迁移：scanning → scanning」。启动时把
+    无存活线程的活动任务标为 terminated，避免卡死。
+    """
+    from app.core.database import SessionLocal
+    from app.models.task import Task
+    from app.services import task_manager
+
+    db = SessionLocal()
+    try:
+        for t in db.query(Task).filter(Task.status.in_(("collecting", "scanning"))).all():
+            ctl = task_manager.TASK_CONTROL.get(t.id)
+            if ctl and ctl.get("thread") and ctl["thread"].is_alive():
+                continue
+            t.status = "terminated"
+            t.error_message = "服务重启，任务被中断"
+        db.commit()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()          # 建表 + 种子管理员（幂等）
+    _recover_stale_tasks()
     yield
 
 

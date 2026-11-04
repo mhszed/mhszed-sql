@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models.audit import BurpSession
 from app.models.base import utcnow_iso
-from app.services import normalizer
+from app.services import normalizer, scope
 from app.services.event_bus import bus
 from app.services.safety import AuthorizationError, SafeHttpClient
 
@@ -37,6 +37,10 @@ _RE_FETCH_PATH = re.compile(
 )
 
 _CRAWL_DEFAULTS = {"max_pages": 30, "max_depth": 3}
+# JS 文件独立配额：仍然抓取并解析（挖 API 接口），但不占用页面 max_pages 额度。
+# 旧实现里每个 .js 都算一页，5~8 个 JS 会把 30 页配额吃掉 1/6~1/4，
+# 导致真实页面（如 pikachu /vul/sqli/ 后段关卡）还没爬到配额就耗尽（2026-11-04 实测）。
+_JS_MAX_PAGES = {"low": 10, "medium": 25, "high": 50}
 
 # 无表单/无链接参数时的常见 GET 参数名兜底探测。
 # 背景（2026-10-15 sqli-labs）：表单被删后 Less-1~10 全漏检；推 Burp 喂 ?id=1
@@ -97,21 +101,42 @@ def crawl_static(db_factory, task_id: int, start_url: str, allowed_hosts: set[st
     elif intensity == "high":
         cfg.update(max_pages=80, max_depth=5)
 
+    # 勾选「仅测试当前目录及子目录」：采集不越出目标目录。
+    # 这样接口清单、AI 研判探针、注入探测三处是同一个边界；
+    # JS 资源仍会抓取（可能含目录内 API 线索），但其解析出的接口同样按前缀过滤。
+    scope_prefix = (scope.target_dir_prefix(start_url)
+                    if scan_config.get("scope_only_current_dir") else None)
+
     # 目标串去空白（httpx 对 " http://..." 会直接 UnsupportedProtocol）。
     start_url = (start_url or "").strip()
     safe_client = SafeHttpClient(db_factory, task_id, allowed_hosts, scan_config)
     visited: set[str] = set()
     new_count = 0
     guess_pages = 0
+    page_visited = 0          # HTML 页面计数，受 max_pages 约束
+    js_visited = 0            # JS 文件计数，独立配额，不占页面额度
+    js_limit = _JS_MAX_PAGES.get(intensity, 25)
     try:
         from collections import deque
         queue = deque([(start_url.rstrip("/"), 0)])
-        while queue and not stop_event.is_set() and len(visited) < cfg["max_pages"]:
+        while queue and not stop_event.is_set():
             url, depth = queue.popleft()
             url = url.split("#")[0]
             if url in visited:
                 continue
+            # 按 URL 后缀区分 JS 与页面；无扩展名的 JS（Content-Type 判定）
+            # 仍计入页面配额，属少见边界，接受。
+            is_js = urlparse(url).path.lower().endswith(".js")
+            if is_js:
+                if js_visited >= js_limit:
+                    continue
+            elif page_visited >= cfg["max_pages"]:
+                continue
             visited.add(url)
+            if is_js:
+                js_visited += 1
+            else:
+                page_visited += 1
             try:
                 resp = safe_client.request("GET", url, headers={"User-Agent": "mhszed-sql-crawler/0.1"},
                                            audit=False)
@@ -126,7 +151,7 @@ def crawl_static(db_factory, task_id: int, start_url: str, allowed_hosts: set[st
                 if "text/html" in ctype:
                     added, has_params = _parse_html(
                         db, task_id, url, resp.text, queue, visited, depth, cfg,
-                        allowed_hosts, start_url)
+                        allowed_hosts, start_url, scope_prefix)
                     new_count += added
                     # 无表单/无链接参数时，用常见参数名轻量试一下（仅深 0-1 页）
                     if (not has_params and scan_config.get("param_guess", True)
@@ -138,13 +163,18 @@ def crawl_static(db_factory, task_id: int, start_url: str, allowed_hosts: set[st
                             len(resp.text or ""), safe_client, intensity,
                             allowed_hosts)
                 elif "javascript" in ctype or url.endswith(".js"):
-                    new_count += _parse_js(db, task_id, url, resp.text, allowed_hosts, start_url)
+                    new_count += _parse_js(db, task_id, url, resp.text, allowed_hosts,
+                                           start_url, scope_prefix)
                 db.commit()
             finally:
                 db.close()
     finally:
         safe_client.close()
-    bus.publish("collect", f"静态爬虫完成：访问 {len(visited)} 页，新增接口 {new_count} 个",
+    scope_note = (f"（范围限定 {scope_prefix}）"
+                  if scope_prefix and scope_prefix != "/" else "")
+    bus.publish("collect",
+                f"静态爬虫完成：访问 {page_visited} 页 + {js_visited} 个 JS，"
+                f"新增接口 {new_count} 个{scope_note}",
                 task_id=task_id, level="success")
     return new_count
 
@@ -155,7 +185,7 @@ def _same_host(url: str, hosts: set[str]) -> bool:
 
 def _parse_html(db: Session, task_id: int, page_url: str, html: str, queue, visited,
                 depth: int, cfg: dict, allowed_hosts: set[str],
-                start_url: str) -> tuple[int, bool]:
+                start_url: str, scope_prefix: str | None = None) -> tuple[int, bool]:
     count = 0
     has_params = bool(urlparse(page_url).query)
     soup = BeautifulSoup(html, "lxml")
@@ -166,6 +196,9 @@ def _parse_html(db: Session, task_id: int, page_url: str, html: str, queue, visi
             link = urljoin(page_url, a["href"]).split("#")[0]
             if link.startswith("http") and _same_host(link, allowed_hosts) \
                     and not normalizer.is_asset_path(urlparse(link).path) and link not in visited:
+                # 目录范围：不越出目标目录（含子目录）
+                if scope_prefix and not scope.path_under_prefix(urlparse(link).path, scope_prefix):
+                    continue
                 if urlparse(link).query:
                     normalizer.upsert_endpoint(db, task_id=task_id, source="crawler",
                                                method="GET", url=link, referer=page_url)
@@ -176,6 +209,9 @@ def _parse_html(db: Session, task_id: int, page_url: str, html: str, queue, visi
     # <form> 直接产生接口
     for form in soup.find_all("form"):
         action = urljoin(page_url, form.get("action") or page_url)
+        # 目录范围：目录外的表单不登记
+        if scope_prefix and not scope.path_under_prefix(urlparse(action).path, scope_prefix):
+            continue
         method = (form.get("method") or "GET").upper()
         body_params = []
         for inp in form.find_all(["input", "select", "textarea"]):
@@ -204,7 +240,8 @@ def _parse_html(db: Session, task_id: int, page_url: str, html: str, queue, visi
             continue
         inline = s.string or s.get_text() or ""
         if inline.strip():
-            js_added = _parse_js(db, task_id, page_url, inline, allowed_hosts, start_url)
+            js_added = _parse_js(db, task_id, page_url, inline, allowed_hosts,
+                                 start_url, scope_prefix)
             count += js_added
             if js_added:
                 has_params = True
@@ -226,7 +263,8 @@ def _normalize_js_path(path: str) -> str:
 
 
 def _parse_js(db: Session, task_id: int, js_url: str, js_text: str,
-              allowed_hosts: set[str], start_url: str) -> int:
+              allowed_hosts: set[str], start_url: str,
+              scope_prefix: str | None = None) -> int:
     count = 0
     found: set[str] = set()
     for m in _RE_API_PATH.finditer(js_text):
@@ -269,6 +307,9 @@ def _parse_js(db: Session, task_id: int, js_url: str, js_text: str,
         if not _same_host(full, allowed_hosts):
             continue
         if normalizer.is_asset_path(urlparse(full).path):
+            continue
+        # 目录范围：JS 里挖出的目录外接口不登记
+        if scope_prefix and not scope.path_under_prefix(urlparse(full).path, scope_prefix):
             continue
         if path in post_targets:
             body_params = [{"name": n, "location": "body", "type": "text",

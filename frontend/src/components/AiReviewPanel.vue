@@ -26,6 +26,11 @@
           <el-tag size="small" :type="routeType(row.route)">{{ routeLabel(row.route) }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="需确认原因" min-width="230" v-if="tab === 'queue'">
+        <template #default="{ row }">
+          <span class="small" :title="(row.reasons || []).join('；')">{{ confirmReason(row) }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="风险分" width="120">
         <template #default="{ row }">
           <el-progress :percentage="Math.round(row.risk_score)" :stroke-width="10"
@@ -112,6 +117,18 @@ function scoreColor(s) {
   if (s >= 70) return '#f56c6c'
   if (s >= 40) return '#e6a23c'
   return '#67c23a'
+}
+
+// 复核队列里直接说明「为什么需要你确认」，而不是让人点开思考才知道
+function confirmReason(row) {
+  if (row.read_write === 'write') {
+    return '敏感写接口（可能修改/删除数据），由你决定是否测试'
+  }
+  const r = (row.reasons || []).join('；')
+  if (r.includes('探针') && (r.includes('静默') || r.includes('失败'))) {
+    return '探针未发现注入证据（盲注/宽字节等无回显注入可能被漏掉），由你决定是否测试'
+  }
+  return 'AI 置信度不足，由你决定是否测试'
 }
 
 function reload() { page.value = 1; load() }

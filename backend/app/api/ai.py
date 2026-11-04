@@ -87,12 +87,26 @@ def endpoint_judgment(endpoint_id: int, user: User = Depends(get_current_user),
              .order_by(Vulnerability.id.desc()).all())
 
     # 综合结论：供页面一眼判断「有没有 SQL」
-    if vulns:
+    # 强证据（研判 risk≥85，通常是探针看到数据库报错/回显）优先于 no_vuln：
+    # 探测判无洞不代表没风险——INSERT/UPDATE 型注入在 risk=1 下根本不测，
+    # 直接显示「未发现」会把强证据抹掉（reg 页 2026-11-04 实测）。
+    has_strong = bool(assessment) and float(assessment.risk_score) >= 85
+    probe_no_conclusion = any(j.result_class in ("no_vuln", "timeout") for j in jobs)
+    confirmed_vulns = [v for v in vulns if v.status == "confirmed"]
+    open_vulns = [v for v in vulns if v.status in ("pending_review", "suspected")]
+    if confirmed_vulns:
         sql_verdict = "confirmed"
         sql_verdict_label = "已确认存在 SQL 注入"
+    elif open_vulns:
+        # 探测命中或强证据，但还没最终确认（待复核/疑似）→ 高度疑似
+        sql_verdict = "suspected"
+        sql_verdict_label = "高度疑似存在 SQL 注入（探测已命中 / 待复核确认）"
     elif any(j.result_class == "vuln" for j in jobs):
         sql_verdict = "detected"
         sql_verdict_label = "探测引擎已命中（待归档确认）"
+    elif has_strong and probe_no_conclusion:
+        sql_verdict = "suspected"
+        sql_verdict_label = "探测未确认，但 AI 探针见强证据（疑似注入，建议提高 risk 重测）"
     elif any(j.result_class == "no_vuln" for j in jobs):
         sql_verdict = "not_found"
         sql_verdict_label = "已探测，当前未发现可注入"

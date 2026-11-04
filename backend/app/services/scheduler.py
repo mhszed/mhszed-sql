@@ -9,6 +9,7 @@
 """
 from urllib.parse import urlencode
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.base import utcnow_iso
@@ -32,6 +33,11 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
     safe_client = SafeHttpClient(lambda: _new_session(), task_id, allowed_hosts, cfg)
 
     total = len(endpoints)
+    # 本轮扫描起始 job id：只统计本轮产生的 timeout，避免历史超时被再次误标
+    start_job_id = db.query(func.max(ScanJob.id)).scalar() or 0
+    # SQLMap 连续超时保护：目标疑似过慢时停止继续施压（阈值 5，命中/正常结果即重置）
+    SQLMAP_TIMEOUT_LIMIT = 5
+    sqlmap_timeout_streak = 0
     try:
         for idx, ep in enumerate(endpoints, 1):
             if stop_check():
@@ -76,8 +82,21 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
 
             # ---------- 引擎1：SQLMap 初筛（AI 已确认则跳过） ----------
             if not ai_confirmed and sqlmap_on:
-                job_sqlmap, result_class, extra = _run_sqlmap_job(db, task_id, ep, cfg)
-                stats["sqlmap_total"] += 1
+                if sqlmap_timeout_streak >= SQLMAP_TIMEOUT_LIMIT:
+                    # 连续超时保护：目标疑似过慢，跳过 SQLMap，结论按"未完成"处理
+                    result_class = "timeout"
+                    stats["sqlmap_total"] += 1
+                    bus.publish("scan",
+                                f"本轮 SQLMap 连续超时 {sqlmap_timeout_streak} 次，"
+                                f"跳过该接口 SQLMap（保护目标）: {ep.method} {ep.path}",
+                                task_id=task_id, level="warn")
+                else:
+                    job_sqlmap, result_class, extra = _run_sqlmap_job(db, task_id, ep, cfg)
+                    stats["sqlmap_total"] += 1
+                    if result_class == "timeout":
+                        sqlmap_timeout_streak += 1
+                    elif result_class in ("vuln_confirmed", "no_vuln"):
+                        sqlmap_timeout_streak = 0
                 if result_class == "unreachable":
                     # sqlmap 连续连接失败主动终止 → 整条流水线停止，防止继续施压。
                     stats["unreachable"] = True
@@ -108,6 +127,7 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
                         hits = [{"vector": "union",
                                  "payload": pg.get("payload") or "UNION ALL SELECT ...",
                                  "criteria": f"flag={pg.get('flag_sample')}"}]
+                    _clear_suspected(db, task_id, ep.id)
                     vuln = evidence.create_vulnerability(
                         db, task_id=task_id, endpoint=ep, scan_job_id=job_sqlmap.id,
                         vuln_type=("sql_injection_union" if is_union else "sql_injection_boolean"),
@@ -185,6 +205,27 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
                 else:
                     stats["inconclusive"] += 1
 
+            # 探测未确认 → 疑似记录（不计入确认漏洞）：
+            # 1) 研判强证据（risk≥85）但探测未确认；
+            # 2) 只要出现过 SQLMap 超时，结论不可信，同样标疑似而不是静默当无洞。
+            if not ai_confirmed:
+                timed_out = (db.query(ScanJob)
+                             .filter(ScanJob.task_id == task_id,
+                                     ScanJob.endpoint_id == ep.id,
+                                     ScanJob.id > start_job_id,
+                                     ScanJob.result_class == "timeout")
+                             .count() > 0)
+                strong = ai.latest_risk(db, ep.id) >= 85
+                unfinished = result_class in ("no_vuln", "timeout", None)
+                # 疑似门槛：必须有明显 SQL 特征（研判 risk≥85）。
+                # 纯超时但无强特征 → 只是「SQLMap 超时」，不建疑似，仅记录日志。
+                if strong and (unfinished or timed_out):
+                    _record_suspected(db, task_id, ep,
+                                      reason="timeout" if timed_out else "strong")
+                elif timed_out:
+                    # 纯超时、无强特征：不标疑似，但同样进结果页走"未完成"流程
+                    _record_suspected(db, task_id, ep, reason="timeout_only")
+
             if stop_check():
                 break
     finally:
@@ -210,6 +251,10 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
     """
     intensity = cfg.get("intensity", "medium")
     timeout_s = {"low": 90, "medium": 180, "high": 300}.get(intensity, 180)
+    # 写接口深度注入测试（默认关）：INSERT/UPDATE 型注入需要 --risk≥2 才会被
+    # SQLMap 测试；开启后会真正执行写语句，仅适用于靶场/已授权且数据可牺牲的目标。
+    write_deep = bool(cfg.get("write_deep_probe")) and ep.read_write == "write"
+    risk_override = 2 if (write_deep and intensity != "high") else None
     path = (ep.raw_path or ep.path or "/").split("?")[0]
     # 按任务目标取 scheme（旧实现硬编码 http，HTTPS 目标初筛 URL 会连错协议）
     from app.models.task import Task as _Task
@@ -235,7 +280,10 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
 
     if ep.method.upper() != "GET" and b_params:
         for cur in b_params:
-            body_map = {p["name"]: "" for p in b_params}
+            # 兄弟参数保留真实样例值（不再置空）：置空会让注册/登录等前置校验失败，
+            # payload 根本到不了 SQL。pikachu reg 页 password 为空 → "必填项不能为空"，
+            # 导致 INSERT 注入永远测不出来（2026-11-04 实测）。
+            body_map = {p["name"]: (p.get("sample_value") or "1") for p in b_params}
             body_map[cur["name"]] = (cur.get("sample_value") or "1")
             targets.append((base, urlencode(body_map), cur["name"],
                             {"focus": cur["name"], "body": body_map}))
@@ -260,8 +308,22 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
         result = runner.run_sqlmap(
             job_id=job.id, url=url, method=ep.method, data=body, param=param,
             is_write=(ep.read_write == "write"), intensity=intensity,
-            timeout_s=timeout_s, dbms_hint=dbms_hint,
+            timeout_s=timeout_s, dbms_hint=dbms_hint, risk_override=risk_override,
         )
+        # 超时策略：多数超时是时间盲注重查询拖的。先禁用时间盲注、
+        # 延长 120s 轻量重测一次；仍超时才停止该接口剩余参数。
+        retried_light = False
+        if result.get("status") == "timeout":
+            bus.publish("scan",
+                        f"SQLMap 超时，改用轻量策略重测一次（禁时延盲注）: {param or '-'}",
+                        task_id=task_id, level="warn")
+            result = runner.run_sqlmap(
+                job_id=job.id, url=url, method=ep.method, data=body, param=param,
+                is_write=(ep.read_write == "write"), intensity=intensity,
+                timeout_s=timeout_s + 120, dbms_hint=dbms_hint,
+                risk_override=risk_override, extra_args=["--technique=BEU"],
+            )
+            retried_light = True
         merged_findings = runner.merge_findings(merged_findings,
                                                 result.get("findings") or {})
         job.status = result["status"]
@@ -277,6 +339,19 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
         job.finished_at = utcnow_iso()
         job.duration_ms = result.get("duration_ms")
         db.commit()
+        # SQLMap 审计留痕（SQLMap 进程不走 SafeHttpClient，默认没有审计记录）
+        try:
+            from app.core.audit import log_action
+            log_action(db, user_id=None, action="sqlmap_scan",
+                       resource_type="endpoint", resource_id=ep.id,
+                       detail={"param": param, "result_class": result.get("result_class"),
+                               "status": result.get("status"),
+                               "exit_code": result.get("exit_code"),
+                               "timeout_s": timeout_s,
+                               "risk_override": risk_override})
+            db.commit()
+        except Exception:
+            db.rollback()
         last_job, last_class = job, result["result_class"]
         last_extra = {"dbms": result["dbms"], "output": result.get("output_tail") or "",
                       "payload": result.get("payload"), "findings": merged_findings,
@@ -287,6 +362,11 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
             return job, "unreachable", last_extra
         if result["result_class"] == "vuln_confirmed":
             return job, result["result_class"], last_extra
+        if retried_light and result["result_class"] == "timeout":
+            bus.publish("scan",
+                        f"轻量重测仍超时，停止该接口剩余参数: {ep.method} {ep.path}",
+                        task_id=task_id, level="warn")
+            return job, "timeout", last_extra
 
     # sqlmap 未确认 → PG-UNION 补枪。仅当研判证据指向 PostgreSQL 才触发
     # （证据驱动的 dbms_hint；对 SQLite/MySQL 靶场跑 PG 补枪纯属浪费请求）
@@ -323,8 +403,70 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
     return last_job, last_class, last_extra
 
 
+def _clear_suspected(db: Session, task_id: int, endpoint_id: int):
+    """确认漏洞后清掉同接口的「疑似未确认」记录。"""
+    from app.models.vuln import Vulnerability
+    db.query(Vulnerability).filter(
+        Vulnerability.task_id == task_id,
+        Vulnerability.endpoint_id == endpoint_id,
+        Vulnerability.status.in_(("suspected", "timeout"))).delete(synchronize_session=False)
+    db.commit()
+
+
+def _record_suspected(db: Session, task_id: int, ep: Endpoint, reason: str = "strong"):
+    """探测未完成记录（不计入确认漏洞统计与正式报告）。
+
+    reason=strong      → status=suspected：研判见 SQL 报错/强证据，但探测未确认；
+    reason=timeout     → status=suspected：强证据 + 探测超时（疑似，待复核）；
+    reason=timeout_only→ status=timeout  ：纯超时、无强 SQL 特征，只是「未完成」，
+                         不叫疑似，但同样进结果页、可深入复测。
+    """
+    from app.models.vuln import Vulnerability
+    existing = (db.query(Vulnerability)
+                .filter(Vulnerability.task_id == task_id,
+                        Vulnerability.endpoint_id == ep.id).first())
+    if existing:
+        return
+    if reason == "timeout_only":
+        status = "timeout"
+        title = f"探测超时未完成（无强 SQL 特征）: {ep.method} {ep.path}"
+        advice = "SQLMap 超时被中断，不能当作无漏洞；建议深入复测或人工核查"
+        conclusion = "探测超时未完成，且无强 SQL 特征（不标疑似，仅提示未完成）"
+    elif reason == "timeout":
+        status = "suspected"
+        title = f"疑似SQL注入（探测超时未完成）: {ep.method} {ep.path}"
+        advice = "SQLMap 超时被中断，不能当作无漏洞；请延长超时或发起深入复测"
+        conclusion = "AI 探针见强 SQL 特征，但探测超时未完成"
+    else:
+        status = "suspected"
+        title = f"疑似SQL注入（探测未确认）: {ep.method} {ep.path}"
+        advice = ("研判探针见 SQL 报错/强证据，但探测未确认；"
+                  "写接口 INSERT/UPDATE 型需 write_deep_probe(risk≥2) 复测")
+        conclusion = "AI 探针见 SQL 报错/强证据，但探测引擎未确认"
+    vuln = Vulnerability(
+        task_id=task_id, endpoint_id=ep.id, scan_job_id=None,
+        vuln_type="sql_injection_error", severity="medium",
+        title=title, status=status, vector_count=1,
+        hardening_advice={"reason": advice},
+    )
+    db.add(vuln)
+    db.flush()
+    evidence.append_evidence(
+        db, vuln.id, "request",
+        f"{ep.method} {ep.host}{ep.raw_path or ep.path}\n"
+        f"研判风险分={ai.latest_risk(db, ep.id):.0f}\n"
+        f"结论：{conclusion}。\n"
+        f"建议：{advice}",
+        meta={"stage": status, "reason": reason},
+    )
+    db.commit()
+    bus.publish("scan", f"疑似注入（探测未确认，已标记待人工核实）: {ep.method} {ep.path}",
+                task_id=task_id, level="warn")
+
+
 def _record_ai_vuln(db: Session, task_id: int, ep: Endpoint, job, extra: dict):
     """把 ai_probe 的确认结果落成漏洞记录（供首轮与兄弟参数兜底轮共用）。"""
+    _clear_suspected(db, task_id, ep.id)
     vectors = {h["vector"] for h in (extra or {}).get("hits", [])}
     vt = ("sql_injection_union" if vectors == {"union"} else
           "sql_injection_time" if vectors == {"time"} else

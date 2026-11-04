@@ -31,6 +31,8 @@ DEFAULT_ADMIN = {"username": "admin", "password": "admin123"}
 # ---- 默认扫描参数（与 docs/02 scan_config 快照结构一致）----
 DEFAULT_SCAN_CONFIG = {
     "intensity": "medium",
+    # 仅测试目标 URL 所在目录及其子目录（采集仍可全站；与 intensity 正交）。
+    "scope_only_current_dir": False,
     "max_concurrency": 3,
     "rate_limit_qps": 1.0,
     "circuit_breaker": {
@@ -49,6 +51,9 @@ DEFAULT_SCAN_CONFIG = {
     # 产生错误结论。需要极速探测时再显式开启，并自行复核。
     "deep_use_blind_extract": False,
     "write_endpoint_protection": True,
+    # 写接口深度注入测试（INSERT/UPDATE 型需要 --risk≥2）：默认关闭，
+    # 开启后会真正执行写语句 —— 仅限靶场/数据可牺牲的授权目标。
+    "write_deep_probe": False,
     "bypass_strategies": ["case_mix", "comment_split", "encoding", "whitespace",
                           "space_comment"],
     "time_based_max_delay_s": 5,

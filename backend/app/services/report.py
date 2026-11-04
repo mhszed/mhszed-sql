@@ -89,7 +89,8 @@ _TYPE_CN = {
 }
 _SEV_CN = {"critical": "严重", "high": "高危", "medium": "中危", "low": "低危"}
 _STATUS_CN = {"pending_review": "待复核", "confirmed": "已确认",
-              "false_positive": "误报"}
+              "false_positive": "误报", "suspected": "疑似未确认",
+              "timeout": "探测超时未完成"}
 
 _TABLE_ERROR_TOKENS = {
     "mysql_fetch_array", "phpstudy", "expects", "warning", "notice",
@@ -280,13 +281,17 @@ def _key_evidence(evids) -> list[str]:
 
 
 def _vuln_lines(task, vulns, db: Session) -> list[str]:
+    suspected_n = sum(1 for v, _ in vulns if v.status == "suspected")
+    timeout_n = sum(1 for v, _ in vulns if v.status == "timeout")
     lines = [
         f"任务: {task.name}  (#{task.id})",
         f"目标: {task.target}",
         f"状态: {task.status}    生成时间: {task.updated_at or task.created_at}",
-        f"漏洞总数: {len(vulns)}  (confirmed={sum(1 for v, _ in vulns if v.status == 'confirmed')},"
+        # 疑似未确认 / 探测超时都不计入漏洞总数，单独列出，避免污染正式结论
+        f"漏洞总数: {len(vulns) - suspected_n - timeout_n}  (confirmed={sum(1 for v, _ in vulns if v.status == 'confirmed')},"
         f" pending_review={sum(1 for v, _ in vulns if v.status == 'pending_review')},"
-        f" false_positive={sum(1 for v, _ in vulns if v.status == 'false_positive')})",
+        f" false_positive={sum(1 for v, _ in vulns if v.status == 'false_positive')};"
+        f" 疑似未确认={suspected_n}; 探测超时未完成={timeout_n})",
         "",
     ]
     # 仅有 WAF 时才加画像段（用户要求：没有就不出现）

@@ -96,9 +96,19 @@
             <el-radio value="high">高</el-radio>
           </el-radio-group>
         </el-form-item>
+        <el-form-item label="探测范围">
+          <el-checkbox v-model="cfg.scope_only_current_dir">
+            仅测试目标 URL 所在目录及子目录（采集与探测均限定）
+          </el-checkbox>
+        </el-form-item>
         <el-form-item label="探测引擎">
           <el-checkbox v-model="cfg.engines.sqlmap_enabled">SQLMap 初筛</el-checkbox>
           <el-checkbox v-model="cfg.engines.ai_probe_enabled">AI Payload 精细化</el-checkbox>
+        </el-form-item>
+        <el-form-item label="写接口测试">
+          <el-checkbox v-model="cfg.write_deep_probe">
+            写接口深度注入测试（INSERT/UPDATE，risk=2，可能修改数据）
+          </el-checkbox>
         </el-form-item>
         <div class="dim small">
           AI 接入（base_url / api_key / model）在「扫描配置」页设置；未配置时自动降级规则引擎。
@@ -151,7 +161,12 @@ const STATUSES = ['created', 'collecting', 'scanning', 'review', 'done', 'stoppe
 const dlg = ref(false)
 const creating = ref(false)
 const form = reactive({ name: '', target: '', collect_mode: 'both' })
-const cfg = reactive({ intensity: 'medium', engines: { sqlmap_enabled: true, ai_probe_enabled: true } })
+const cfg = reactive({
+  intensity: 'medium',
+  scope_only_current_dir: false,
+  write_deep_probe: false,
+  engines: { sqlmap_enabled: true, ai_probe_enabled: true },
+})
 
 const drawer = ref(false)
 const activeTask = ref(null)
@@ -174,6 +189,8 @@ async function load() {
 function openCreate() {
   form.name = ''; form.target = ''; form.collect_mode = 'both'
   cfg.intensity = 'medium'
+  cfg.scope_only_current_dir = false
+  cfg.write_deep_probe = false
   cfg.engines = { sqlmap_enabled: true, ai_probe_enabled: true }
   dlg.value = true
 }

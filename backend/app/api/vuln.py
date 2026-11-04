@@ -33,7 +33,7 @@ def list_vulns(task_id: int, page: int = 1, page_size: int = 10, status: str | N
     return {"total": total, "page": page, "page_size": page_size, "items": [{
         "id": v.id, "title": v.title, "vuln_type": v.vuln_type, "severity": v.severity,
         "status": v.status, "dbms": v.dbms, "vector_count": v.vector_count,
-        "method": e.method, "path": e.path, "host": e.host,
+        "endpoint_id": e.id, "method": e.method, "path": e.path, "host": e.host,
         "hardening_advice": v.hardening_advice, "created_at": v.created_at,
     } for v, e in rows]}
 
@@ -112,6 +112,8 @@ class DeepExploitReq(BaseModel):
     mode: str = Field(pattern="^(enum|dump|ai)$")
     # 每次必选：schema=实战库表/结构；flag=靶场 flag。不设默认值。
     goal: str = Field(pattern="^(schema|flag)$")
+    # 盲注定向提取（默认关）：开启才逐字符提取，独立 180s 硬预算
+    blind_extract: bool = False
 
 
 @router.post("/{vuln_id}/deep-exploit")
@@ -124,6 +126,7 @@ def deep_exploit(vuln_id: int, req: DeepExploitReq,
         raise HTTPException(404, "漏洞不存在")
     try:
         st = deep_svc.start_deep_exploit(vuln_id, req.mode, goal=req.goal,
+                                         blind_extract=bool(req.blind_extract),
                                          user_id=user.id)
     except ValueError as e:
         raise HTTPException(400, str(e))

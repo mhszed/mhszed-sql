@@ -69,7 +69,9 @@ def create_vulnerability(db: Session, *, task_id: int, endpoint: Endpoint,
         task_id=task_id, endpoint_id=endpoint.id, scan_job_id=scan_job_id,
         vuln_type=vuln_type, severity=_SEVERITY_BY_TYPE.get(vuln_type, "high"),
         title=title, dbms=dbms, vector_count=vector_count,
-        status="pending_review",                    # 闸门④：一律人工复核
+        # 探测引擎（SQLMap/AI Payload）已复现确认 → 直接视为"存在"。
+        # 只有研判强证据但探测未确认的才会以 suspected 进待复核队列。
+        status="confirmed",
         hardening_advice=build_advice(vuln_type, dbms),
     )
     db.add(vuln)

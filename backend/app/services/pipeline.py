@@ -8,7 +8,7 @@
 import traceback
 
 from app.core.database import SessionLocal
-from app.services import task_manager, collector, normalizer, waf, ai, scheduler
+from app.services import task_manager, collector, normalizer, waf, ai, scheduler, scope
 from app.services.event_bus import bus
 
 
@@ -75,6 +75,20 @@ def run_task(task_id: int, allowed_hosts: set[str]):
         # ---------- 阶段5：流水线探测（仅 auto_pass 自动探；其余等人确认后 resume） ----------
         engines = cfg.get("engines", {})
         eligible = [ep for ep in endpoints if _ep_route(db, ep.id) == "auto_pass"]
+        # 「仅测试当前目录及子目录」开关（与探测强度正交，默认关闭）。
+        # 采集阶段仍可覆盖全站（接口清单要全），但发注入 payload 的接口不应
+        # 因为种子页在 /vul/sqli/ 就扩散到整站所有模块（实战中误伤面过大）。
+        if cfg.get("scope_only_current_dir"):
+            prefix = scope.target_dir_prefix(task.target)
+            if prefix != "/":
+                before = len(eligible)
+                eligible = [ep for ep in eligible if scope.path_under_prefix(ep.path, prefix)]
+                skipped = before - len(eligible)
+                if skipped > 0:
+                    bus.publish("task",
+                                f"探测范围限定为 {prefix}（目录及子目录），"
+                                f"跳过 {skipped} 个目录外接口",
+                                task_id=task_id)
         stats = {"vulns": 0}
         if eligible and (engines.get("sqlmap_enabled", True) or engines.get("ai_probe_enabled", True)):
             if stop():
@@ -118,7 +132,8 @@ def run_task(task_id: int, allowed_hosts: set[str]):
         db.close()
 
 
-def run_endpoint_scan(task_id: int, endpoint_id: int, allowed_hosts: set[str]):
+def run_endpoint_scan(task_id: int, endpoint_id: int, allowed_hosts: set[str],
+                      config_override: dict | None = None):
     """定向重扫单个接口（手动录入后的补扫）。
 
     不重新采集、不重扫其他接口；只跑探测调度。收口：有 pending_review 漏洞 → review，
@@ -134,7 +149,8 @@ def run_endpoint_scan(task_id: int, endpoint_id: int, allowed_hosts: set[str]):
         ep = db.query(Endpoint).filter(Endpoint.id == endpoint_id).first()
         if not task or not ep:
             return
-        cfg = task.scan_config or {}
+        # 复测可临时覆盖配置（如「写接口深度注入测试」risk=2），不影响任务其它接口
+        cfg = {**(task.scan_config or {}), **(config_override or {})}
         task_manager.update_progress(db, task_id, stage="scanning", done=0, total=1,
                                      current_step=f"{ep.method} {ep.path}")
         try:
@@ -148,7 +164,7 @@ def run_endpoint_scan(task_id: int, endpoint_id: int, allowed_hosts: set[str]):
             return
         has_review = db.query(Vulnerability).filter(
             Vulnerability.task_id == task_id,
-            Vulnerability.status == "pending_review").count() > 0
+            Vulnerability.status.in_(("pending_review", "suspected", "timeout"))).count() > 0
         task_manager.set_status(db, task_id, "review" if has_review else "done")
         task_manager.update_progress(
             db, task_id, stage="review" if has_review else "done", done=1, total=1,

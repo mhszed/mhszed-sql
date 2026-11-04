@@ -58,8 +58,21 @@ def list_endpoints(task_id: int, page: int = 1, page_size: int = 15,
         q = q.filter(Endpoint.path.contains(keyword))
     total = q.count()
     rows = q.order_by(Endpoint.id.asc()).offset((page - 1) * page_size).limit(page_size).all()
-    return {"total": total, "page": page, "page_size": page_size,
-            "items": [_ep_dict(r) for r in rows]}
+    # 附带该接口最新漏洞状态：前端据此决定是否还需要「深入复测」，
+    # 已确认的接口不再显示复测入口。
+    from app.models.vuln import Vulnerability
+    latest = {}
+    for vid, eid, st in (db.query(Vulnerability.id, Vulnerability.endpoint_id,
+                                  Vulnerability.status)
+                         .filter(Vulnerability.task_id == task_id).all()):
+        if eid not in latest or vid > latest[eid][0]:
+            latest[eid] = (vid, st)
+    items = []
+    for r in rows:
+        d = _ep_dict(r)
+        d["vuln_status"] = latest.get(r.id, (None, None))[1]
+        items.append(d)
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
 
 
 @router.post("/endpoints")
@@ -191,12 +204,16 @@ def _confirmed_context(payload: str) -> dict:
 
 
 @router.post("/endpoints/{endpoint_id}/scan")
-def scan_endpoint(endpoint_id: int, user: User = Depends(get_current_user),
+def scan_endpoint(endpoint_id: int, write_deep_probe: bool = False,
+                  user: User = Depends(get_current_user),
                   db: Session = Depends(get_db)):
     """定向重扫单个接口（手动录入后的补扫）。
 
     不重新采集、不碰其他接口：只对该接口跑探测调度（AI 探针 / sqlmap）。
     允许 done/terminated 任务回到 scanning（见 task_manager._TRANSITIONS）。
+
+    write_deep_probe=true：本次复测临时启用 SQLMap --risk=2，
+    用于 INSERT/UPDATE 型注入（会真实执行写语句，仅限靶场/数据可牺牲目标）。
     """
     from app.services import task_manager
     from app.services.safety import AuthorizationError
@@ -204,14 +221,17 @@ def scan_endpoint(endpoint_id: int, user: User = Depends(get_current_user),
     ep = db.query(Endpoint).filter(Endpoint.id == endpoint_id).first()
     if not ep:
         raise HTTPException(404, "接口不存在")
+    override = {"write_deep_probe": True} if write_deep_probe else None
     try:
         task = task_manager.start_endpoint_scan(db, ep.task_id, endpoint_id,
-                                                user_id=user.id)
+                                                user_id=user.id,
+                                                config_override=override)
     except AuthorizationError as e:
         raise HTTPException(403, str(e))
     except task_manager.TaskStateError as e:
         raise HTTPException(400, str(e))
-    return {"ok": True, "task_id": task.id, "status": task.status}
+    return {"ok": True, "task_id": task.id, "status": task.status,
+            "write_deep_probe": bool(write_deep_probe)}
 
 
 @router.delete("/endpoints/{endpoint_id}")

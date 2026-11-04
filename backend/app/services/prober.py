@@ -504,6 +504,21 @@ def probe_endpoint(db: Session, endpoint: Endpoint, waf_profile, safe_client: Sa
                     continue
                 hit, criteria = _controlled_time_hit(elapsed, fast, delay)
                 if hit:
+                    # 复测一次：确认时延可复现再落漏洞，过滤服务器抖动造成的误判
+                    #（pikachu blind_t 曾把无效的双引号 payload 误记成确认 payload）。
+                    try:
+                        resp2 = safe_client.request(endpoint.method, url, params=req_params,
+                                                    data=req_data, payload=payload)
+                        elapsed2 = _elapsed(safe_client)
+                    except Exception:
+                        continue
+                    hit2, _ = _controlled_time_hit(elapsed2, fast, delay)
+                    if not hit2:
+                        bus.publish("scan",
+                                    f"时间盲注首次命中但复测不可复现，判抖动（{target_param}）",
+                                    level="warn")
+                        _maybe_rewrite(payload, resp.text or "", "time", false_payload)
+                        continue
                     hits.append({"payload": payload, "vector": "time",
                                  "criteria": criteria, "controlled": True,
                                  "elapsed_ms": int(elapsed * 1000)})

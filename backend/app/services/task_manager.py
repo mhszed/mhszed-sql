@@ -120,7 +120,8 @@ def start_task(db: Session, task_id: int, user_id: int | None = None) -> Task:
 
 
 def start_endpoint_scan(db: Session, task_id: int, endpoint_id: int,
-                        user_id: int | None = None) -> Task:
+                        user_id: int | None = None,
+                        config_override: dict | None = None) -> Task:
     """定向重扫单个接口（手动录入后的补扫）。
 
     不重新采集、不碰其他接口：直接对这一个接口跑探测调度（AI 探针 / sqlmap）。
@@ -138,6 +139,19 @@ def start_endpoint_scan(db: Session, task_id: int, endpoint_id: int,
                                    Endpoint.task_id == task_id).first()
     if not ep:
         raise TaskStateError("接口不存在或不属于该任务")
+
+    # 正在扫描时重复点击：给友好提示，而不是「非法状态迁移 scanning → scanning」
+    with _tc_lock:
+        ctl = TASK_CONTROL.get(task_id)
+        if ctl and ctl.get("thread") and ctl["thread"].is_alive():
+            raise TaskStateError("任务正在扫描中，请等待当前扫描完成后再发起深入复测")
+
+    # 僵尸 scanning（线程已结束）：先复位，允许重新进入
+    if task.status == "scanning":
+        task.status = "terminated"
+        task.error_message = "扫描线程已结束，允许重新复测"
+        db.commit()
+
     _assert_transition(task.status, "scanning")
 
     ok, scope, reason = safety.check_authorization(db, task.target)
@@ -165,13 +179,15 @@ def start_endpoint_scan(db: Session, task_id: int, endpoint_id: int,
 
     from app.services import pipeline
     t = threading.Thread(target=pipeline.run_endpoint_scan,
-                         args=(task_id, endpoint_id, allowed_hosts),
+                         args=(task_id, endpoint_id, allowed_hosts, config_override),
                          name=f"task-{task_id}-ep{endpoint_id}", daemon=True)
     with _tc_lock:
         TASK_CONTROL[task_id]["thread"] = t
     t.start()
+    override_note = "（含写接口 risk≥2 深度测试）" if (config_override or {}).get("write_deep_probe") else ""
     bus.publish("task", f"任务 #{task_id} 定向重扫接口 #{endpoint_id}"
-                        f"（{ep.method} {ep.path}）", task_id=task_id, level="success")
+                        f"（{ep.method} {ep.path}）{override_note}",
+                task_id=task_id, level="success")
     return task
 
 

