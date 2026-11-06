@@ -197,6 +197,8 @@ function openThought(row) {
 
 async function review(row, action) {
   await http.post(`/ai/review/${row.assessment_id}`, { action })
+  // 新一轮确认后允许再次自动恢复（否则成功过一次后，后续确认不会再触发扫描）
+  if (action === 'confirm') resumeAsked = false
   ElMessage.success(action === 'confirm' ? '已确认，将进入探测队列' : '已标记误报，回流负样本库')
   await load()
 }

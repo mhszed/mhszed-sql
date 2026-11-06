@@ -18,6 +18,54 @@ AI 分级研判（人在回路）→ 流水线探测（SQLMap + AI Payload）→
 - 漏洞证据链、报告导出（PDF）
 - 知识库（成功 Payload / 误报样本 / 文章知识点）
 - 审计日志（哈希链）与日志清空
+- **HTTPS 目标协议跟随**：接口采集时记录 scheme，研判/探测/深挖不再硬编码 http
+- **盲注自动发现**：布尔确认后做全量反证；扫描阶段出现“疑似可注”信号自动补
+  `--technique=T` 定向重试，避免 medium 强度漏掉纯时间盲注
+- **盲注深挖回退**：轻量提取失败后自动回退 sqlmap 取当前库名；`dump` 模式继续
+  枚举表/脱裤（≤5 行），各步独立预算
+- **证据链可复现**：记录 sqlmap `-v 3` 下真实取数 `[PAYLOAD]`、取数语句与命令，
+  与检测 Payload 分开标注
+- **复核恢复与漏扫修复**：确认后可恢复（review/done/terminated）；按引擎判定是否
+  扫完；停止任务/启动时清理僵尸 job；重复扫描只合并证据不重复建漏洞
+- **跨进程 host 锁**：后端与独立脚本同时对同一目标跑 sqlmap 时串行排队
+
+## 新功能与使用方式（2026-11）
+
+### 1. HTTPS 目标
+直接填 `https://...` 即可。采集、研判、扫描、深挖都会跟随目标协议，无需额外配置。
+
+### 2. 盲注自动发现
+无需操作。扫描阶段如果 sqlmap 报告“疑似可注但未确认”，工具会自动对该参数补一次
+时间盲注重试；扫出后漏洞类型显示为「时间盲注」。
+
+### 3. 人工复核后恢复扫描
+「接口采集 → 复核」里点「确认扫描」；复核队列清空后自动恢复探测。
+任务状态是 `done` / `terminated` 也能恢复；重复扫描不会重复建漏洞。
+
+### 4. 盲注深入利用怎么点
+「漏洞结果」→ 该漏洞的「深入利用」：
+
+1. 选**模式**：`enum`（库表）/ `dump`（脱裤，最多 5 行）/ `ai`；
+2. 选**目标**：`schema`（拿到库名即停）/ `flag`（靶场取 flag）；
+3. 盲注目标可勾选**「盲注定向提取」**：
+   - 读接口：轻量提取失败后会自动回退 sqlmap，不勾也能跑；
+   - 写接口：必须勾选才回退（防止时间盲注真的执行写语句）；
+4. 预算：库名 300s、表枚举 600s、脱裤 300s；超时会保留已完成部分。
+
+> 纯时间盲注的表枚举/脱裤天然很慢，可能超时；能取到库名即已证明可读库。
+
+### 5. 证据链怎么看
+「漏洞结果」→「证据链」：
+
+- 摘要按**「结果 → 对应 payload/命令」**排列：
+  `数据库名 → 取数 Payload → sqlmap 参数`；表和样本同理；
+- 「取数 Payload」是 sqlmap 真实发出的取数语句（`-v 3` 的 `[PAYLOAD]`），可直接复现；
+- 「检测 Payload（非取数语句）」放在最后，只用于确认注入点；
+- 深挖过程在「过程记录」折叠中；抽屉打开时每 5 秒自动刷新。
+
+### 6. 这些不用手动管
+重复漏洞合并、僵尸 job 清理、任务恢复、同一 host 的 sqlmap 排队，工具会自动处理。
+正常从 UI 使用不会出现并发互抢；不要在后端运行时另起脚本打同一目标即可。
 
 ## 技术栈
 
@@ -212,6 +260,13 @@ curl -s https://api.deepseek.com/v1/chat/completions \
 - **深入利用**需选择模式与目标：
   - 模式：`enum`（库表枚举）/ `dump`（受限脱裤，最多 5 行）/ `ai`（AI 规划）；
   - 目标：`schema`（只要一个库名即停）/ `flag`（靶场取 flag）；
+- **盲注定向提取**：勾选后允许轻量盲注逐字符提取；失败时读接口会自动回退 sqlmap
+  （写接口必须勾选，避免时间盲注真的执行写语句）；
+- **证据链摘要按“结果 → 对应 payload/命令”展示**：
+  - 数据库名 / 表 / 样本后紧跟真实取数 Payload（sqlmap `-v 3` 的 `[PAYLOAD]`）
+    和 `sqlmap 参数`；
+  - 盲注额外标注「检测 Payload（非取数语句）」，避免把检测语句误当取数语句；
+  - 深挖过程写在证据链中，深挖弹窗只保留入口，不再展示详细日志；
 - 结果、证据链（payload / 请求特征 / 响应 / 深挖日志）都会落库，可在漏洞详情查看；
 - 报告：`GET /api/vuln/report/download?task_id=<id>` 导出 PDF。
 
@@ -252,6 +307,15 @@ venv\Scripts\python tests\smoke_3.py     :: 端到端 + 报告
 venv\Scripts\python tests\smoke_4_deploy.py
 venv\Scripts\python tests\smoke_5_bypass.py
 venv\Scripts\python tests\smoke_6_evidence_chain.py
+:: 新增离线单测（不依赖服务）
+venv\Scripts\python tests\test_endpoint_scheme.py
+venv\Scripts\python tests\test_counterproof.py
+venv\Scripts\python tests\test_resume_flow.py
+venv\Scripts\python tests\test_dedupe_recovery.py
+venv\Scripts\python tests\test_time_retry.py
+venv\Scripts\python tests\test_blind_fallback.py
+venv\Scripts\python tests\test_blind_dump.py
+venv\Scripts\python tests\test_cross_host_lock.py
 ```
 
 ## 免责声明

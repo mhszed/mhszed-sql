@@ -231,7 +231,8 @@ def _collect_sqli_probes(endpoint: Endpoint) -> list[dict]:
     if not params:
         return []
     path = (endpoint.raw_path or endpoint.path or "/").split("?")[0]
-    url = f"http://{endpoint.host}{path}"
+    # 协议随接口走：HTTPS 目标把探针拼成 http 会连错协议，研判拿到的是假证据。
+    url = f"{getattr(endpoint, 'scheme', None) or 'http'}://{endpoint.host}{path}"
     out = []
     client = httpx.Client(timeout=12.0, follow_redirects=True, verify=False,
                           trust_env=False)   # 探针不走系统代理（实测会 30s 超时）

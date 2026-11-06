@@ -163,6 +163,9 @@ function openThought(row) {
 
 async function review(row, action) {
   await http.post(`/ai/review/${row.assessment_id}`, { action })
+  // 新一轮确认后允许再次自动恢复：旧实现只允许自动 resume 一次，
+  // 成功过一次后 resumeAsked 一直是 true，后续再确认就不会开扫了。
+  if (action === 'confirm') resumeAsked = false
   ElMessage.success(action === 'confirm' ? '已确认，将进入探测队列' : '已标记误报')
   await load()
 }

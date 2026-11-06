@@ -65,6 +65,34 @@ def create_vulnerability(db: Session, *, task_id: int, endpoint: Endpoint,
                          scan_job_id: int | None, vuln_type: str, title: str,
                          dbms: str | None = None, vector_count: int = 1,
                          hits: list[dict] | None = None) -> Vulnerability:
+    # 同一接口 + 同一注入类型视为同一个漏洞：重复扫描只合并证据，不再新建记录。
+    # （2026-11-06 实测：ep79 被扫两次产生 #11/#14 两条完全相同的 time-based 漏洞）
+    # 已人工标记误报的不合并——重新确认应作为新记录出现，避免覆盖人工判断。
+    existing = (db.query(Vulnerability)
+                .filter(Vulnerability.task_id == task_id,
+                        Vulnerability.endpoint_id == endpoint.id,
+                        Vulnerability.vuln_type == vuln_type,
+                        Vulnerability.status != "false_positive")
+                .order_by(Vulnerability.id.desc()).first())
+    if existing:
+        existing.scan_job_id = scan_job_id or existing.scan_job_id
+        existing.vector_count = max(existing.vector_count or 1, vector_count)
+        if dbms and not existing.dbms:
+            existing.dbms = dbms
+        existing.hardening_advice = build_advice(vuln_type, existing.dbms or dbms)
+        seq = db.query(Evidence).filter(Evidence.vulnerability_id == existing.id).count() + 1
+        for h in (hits or []):
+            seq = _add_evidence_dedup(
+                db, existing.id, seq, "payload",
+                f"[{h.get('vector')}] {h.get('payload')}\n预期判据: {h.get('criteria')}",
+                meta={"vector": h.get("vector"), "payload": h.get("payload"),
+                      "criteria": h.get("criteria"),
+                      "controlled": bool(h.get("controlled"))})
+        db.commit()
+        bus.publish("vuln", f"漏洞已存在，合并证据（不重复产出）: {title}",
+                    task_id=task_id, level="warn")
+        return existing
+
     vuln = Vulnerability(
         task_id=task_id, endpoint_id=endpoint.id, scan_job_id=scan_job_id,
         vuln_type=vuln_type, severity=_SEVERITY_BY_TYPE.get(vuln_type, "high"),
@@ -118,6 +146,20 @@ def add_response_evidence(db: Session, vuln_id: int, seq: int, response_text: st
                           status_code: int, elapsed_ms: int) -> int:
     return _add_evidence(db, vuln_id, seq, "response", response_text[:20000],
                          meta={"http_status": status_code, "elapsed_ms": elapsed_ms})
+
+
+def _add_evidence_dedup(db: Session, vuln_id: int, seq: int, etype: str, content: str,
+                        meta: dict | None = None) -> int:
+    """同类型同内容的证据只留一条（重复扫描不重复堆积证据）。"""
+    h = hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()
+    dup = (db.query(Evidence)
+           .filter(Evidence.vulnerability_id == vuln_id,
+                   Evidence.evidence_type == etype,
+                   Evidence.sha256 == h)
+           .first())
+    if dup:
+        return seq
+    return _add_evidence(db, vuln_id, seq, etype, content, meta)
 
 
 def _add_evidence(db: Session, vuln_id: int, seq: int, etype: str, content: str,

@@ -90,6 +90,7 @@ class _Prober:
         self.deadline = deadline          # 绝对时间戳（time.monotonic 基准）
         self.requests = 0
         self.error: str | None = None
+        self.last_payload = ""          # 最近一次真正发出的时间盲注 payload
 
     def _send(self, payload: str):
         url, params, data = _build_request(self.endpoint, self.param, payload)
@@ -122,6 +123,7 @@ class _Prober:
                                 quote=self.quote, sec=self.sec)
         if not payload:
             return None
+        self.last_payload = payload
         times = []
         for attempt in range(2):
             try:
@@ -196,7 +198,8 @@ def extract_scalar(client, endpoint, param: str, base_value, dbms: str, expr: st
                      quote=quote, sec=sec, deadline=deadline)
     value = prober.extract_string(expr, max_len=max_len, progress_cb=progress_cb)
     return {"value": value, "requests": prober.requests, "error": prober.error,
-            "partial": getattr(prober, "partial", False)}
+            "partial": getattr(prober, "partial", False),
+            "payload": prober.last_payload or ""}
 
 
 # 表/列名清单一次性取回（MySQL）：concat 用 0x3a 冒号连接，group_concat 默认逗号分隔。

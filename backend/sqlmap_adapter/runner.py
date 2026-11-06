@@ -61,8 +61,71 @@ def _host_lock(url: str) -> threading.Lock:
         return _HOST_LOCKS.setdefault(netloc, threading.Lock())
 
 
+_CROSS_LOCK_DIR = Path(config.DATA_DIR) / "locks"
+_CROSS_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _acquire_cross_host_lock(url: str, timeout: float = _MAX_HOST_WAIT_S):
+    """跨进程 host 锁：后端与独立脚本同时打同一目标时也串行化 sqlmap。
+
+    进程内 threading.Lock 管不到另一个进程（实测两个进程同时 SLEEP 会把靶场打挂）。
+    用 OS 文件锁（Windows msvcrt / POSIX fcntl），进程崩溃时由系统自动释放。
+    """
+    netloc = _host_of(url)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", netloc)[:80] or "unknown"
+    path = _CROSS_LOCK_DIR / f"sqlmap_{safe}.lock"
+    f = open(path, "a+b")
+    try:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            f.write(b" ")
+            f.flush()
+        deadline = time.monotonic() + max(0.1, timeout)
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return f
+            except OSError:
+                if time.monotonic() >= deadline:
+                    f.close()
+                    return None
+                time.sleep(0.5)
+    except Exception:
+        try:
+            f.close()
+        except Exception:
+            pass
+        return None
+
+
+def _release_cross_host_lock(f) -> None:
+    if not f:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    finally:
+        try:
+            f.close()
+        except Exception:
+            pass
+
+
 def _serialized_per_host(func):
-    """同一 host 同时只允许一个 sqlmap 进程（等锁最多 600s，超时返回 error）。"""
+    """同一 host 同时只允许一个 sqlmap 进程（跨进程文件锁，等锁最多 600s）。"""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         url = kwargs.get("url") or (args[0] if args else "")
@@ -72,9 +135,17 @@ def _serialized_per_host(func):
                     "output_tail": "同 host 已有 sqlmap 任务在运行，等待超时后放弃",
                     "payload": None, "pid": None, "exit_code": -1,
                     "duration_ms": 0, "full_output": "", "findings": {}}
+        cross = _acquire_cross_host_lock(str(url))
+        if cross is None:
+            lock.release()
+            return {"status": "error", "result_class": "error", "dbms": None,
+                    "output_tail": "同 host 已有其他进程的 sqlmap 任务在运行，等待超时后放弃",
+                    "payload": None, "pid": None, "exit_code": -1,
+                    "duration_ms": 0, "full_output": "", "findings": {}}
         try:
             return func(*args, **kwargs)
         finally:
+            _release_cross_host_lock(cross)
             lock.release()
     return wrapper
 
@@ -157,7 +228,7 @@ _ALLOWED_EXTRA = {
     "--start", "--stop", "--first", "--last", "--count", "--sql-query",
     "--string", "--not-string", "--code",
     "--no-cast", "--hex", "--fresh-queries", "-D", "-T", "-C", "-p",
-    "--time-sec",
+    "--time-sec", "-v", "--verbose",
 }
 
 # --tamper 值白名单：只允许项目自带/确认安全的脚本，杜绝任意 py 加载。
@@ -266,7 +337,7 @@ def _sanitize_extra_args(extra_args: list[str] | None) -> list[str]:
         if key in ("-D", "-T", "-C", "-p", "--dbms", "--technique",
                    "--start", "--stop", "--first", "--last", "--sql-query",
                    "--threads", "--string", "--not-string", "--code",
-                   "--prefix", "--suffix", "--time-sec"):
+                   "--prefix", "--suffix", "--time-sec", "-v", "--verbose"):
             # 注意：值本身**可能以 `-` 开头**（最典型的是 MySQL 注释后缀 `-- -`）。
             # 旧写法 `not startswith("-")` 会把它当成"没有值"直接丢弃，
             # 于是 sqlmap 收到 `--suffix --technique` 这种错配（实测 Less-12 深入利用）。
@@ -288,6 +359,23 @@ def _sanitize_extra_args(extra_args: list[str] | None) -> list[str]:
 
 
 @_serialized_per_host
+def _extract_data_payload(output: str) -> str | None:
+    """从 -v 3 输出里取最后一条真正用于取数的 [PAYLOAD]。
+
+    取数阶段输出形如：
+        [PAYLOAD] 1' AND (SELECT ... IF(...,SLEEP(...),0) ...)
+        [INFO] retrieved: root
+    取 `retrieved:` 前最后一条 [PAYLOAD]；没有 retrieved 时返回最后一条。
+    """
+    last = None
+    for ln in (output or "").splitlines():
+        if "[PAYLOAD]" in ln:
+            last = ln.split("[PAYLOAD]", 1)[1].strip()
+        elif "retrieved:" in ln.lower() and last:
+            return last
+    return last
+
+
 def _exploit_produced(output: str) -> bool:
     """利用模式是否真的产出了战果。
 
@@ -485,9 +573,11 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
         _produced = _exploit_produced(output)
         if _fatal and not _produced:
             result_class = "error"
-        elif output.strip():
+        elif _produced:
             result_class = "exploit_ok"
         else:
+            # 有输出 ≠ 有战果：`does not seem to be injectable` 也是输出。
+            # 旧实现只要 output 非空就判 exploit_ok，导致失败的 --tables 被当成功。
             result_class = "inconclusive"
     else:
         result_class = parse_result_class(output, rc)
@@ -498,6 +588,7 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
                 level="success" if result_class in ("vuln_confirmed", "exploit_ok") else "info")
     return {"status": status, "result_class": result_class, "dbms": dbms,
             "unreachable": status == "unreachable",
+            "data_payload": _extract_data_payload(full_output),
             "payload": _extract_payload(full_output) if result_class == "vuln_confirmed" else None,
             "output_tail": output[-4000:], "full_output": full_output[-12000:],
             "findings": findings,

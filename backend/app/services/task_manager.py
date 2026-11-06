@@ -19,7 +19,8 @@ from app.services import safety
 
 # 合法状态迁移表
 _TRANSITIONS = {
-    "pending":       {"collecting"},
+    # 手动录入接口的任务可以跳过采集直接定向扫描（任务里只有手工接口时用）。
+    "pending":       {"collecting", "scanning"},
     "collecting":    {"scanning", "terminated", "paused_circuit"},
     "scanning":      {"review", "done", "terminated", "paused_circuit"},
     "paused_circuit": {"scanning", "terminated"},
@@ -38,6 +39,22 @@ _tc_lock = threading.Lock()
 
 class TaskStateError(Exception):
     pass
+
+
+def is_scan_running(task_id: int) -> bool:
+    """该任务是否有存活的扫描线程（用于 resume 幂等与僵尸状态识别）。"""
+    ctl = TASK_CONTROL.get(task_id)
+    return bool(ctl and ctl.get("thread") and ctl["thread"].is_alive())
+
+
+def register_scan_thread(task_id: int, thread, allowed_hosts: set[str] | None = None) -> None:
+    """登记恢复扫描线程：让 /stop 能真正打断它（旧 resume 未登记线程，停不下来）。"""
+    with _tc_lock:
+        ctl = TASK_CONTROL.get(task_id)
+        hosts = set(allowed_hosts or (ctl or {}).get("hosts") or set())
+        # 每次新扫描用新的 stop 事件：旧任务残留的 stop 不能让新线程一启动就退出。
+        ctl = {"stop": threading.Event(), "thread": thread, "hosts": hosts}
+        TASK_CONTROL[task_id] = ctl
 
 
 def normalize_target(target: str) -> str:
@@ -206,6 +223,16 @@ def stop_task(db: Session, task_id: int, user_id: int | None = None) -> Task:
     task.status = "terminated"
     task.finished_at = utcnow_iso()
     task.error_message = task.error_message or "人工终止"
+    # 中断时把在跑的 job 一并标 killed：否则它们会一直停在 running，
+    # 恢复扫描时被当成"已扫过"，该接口从此永久漏扫（2026-11-06 实测）。
+    from app.models.scan import ScanJob
+    _now = utcnow_iso()
+    for j in (db.query(ScanJob)
+              .filter(ScanJob.task_id == task_id,
+                      ScanJob.status.in_(("queued", "running")))
+              .all()):
+        j.status = "killed"
+        j.finished_at = j.finished_at or _now
     log_action(db, user_id=user_id, action="task_stop", resource_type="task",
                resource_id=task_id, detail={})
     db.commit()

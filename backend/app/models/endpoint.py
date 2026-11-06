@@ -20,6 +20,9 @@ class Endpoint(IdMixin, TimestampMixin, Base):
     path = Column(Text, nullable=False)          # 归一后路径（{id} 占位）
     raw_path = Column(Text, nullable=True)
     host = Column(String(256), nullable=False)
+    # 采集时的协议。探测端不能硬编码 http —— HTTPS 目标会连错协议（2026-11-06）。
+    # 旧数据为 NULL，探测端回退 http。
+    scheme = Column(String(8), nullable=True)
     params = Column(JSON, nullable=True)          # [{name, location, type, sample_value, required}]
     headers = Column(JSON, nullable=True)
     read_write = Column(String(8), nullable=False, default="read")

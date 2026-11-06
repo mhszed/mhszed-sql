@@ -213,31 +213,10 @@
         <el-radio value="dump" border>脱裤样本（最多 5 行，需二次确认）</el-radio>
       </el-radio-group>
       <el-checkbox v-model="deepBlind" style="margin-top: 10px">
-        盲注定向提取（默认关；开启才逐字符提取，耗时/请求较多，独立 180s 预算）
+        盲注定向提取（默认关；开启才逐字符提取，库名 300s、表/脱裤各 300s 预算）
       </el-checkbox>
-      <div v-if="deepStatus" class="deep-status">
-        <el-tag :type="deepStatus.status === 'error' ? 'danger' : deepStatus.status === 'done' ? 'success' : 'warning'" size="small">
-          {{ deepStatus.status }}
-        </el-tag>
-        <span class="mono small">{{ stageLabel(deepStatus.stage) }}</span>
-        <div class="dim small" style="margin-top: 6px">{{ deepStatus.summary }}</div>
-        <div v-if="deepResultRows.length" class="deep-result">
-          <div class="dim small">已获取结果</div>
-          <div v-for="r in deepResultRows" :key="r.label" class="deep-result-row">
-            <span class="dim">{{ r.label }}</span>
-            <span class="mono">{{ r.value }}</span>
-          </div>
-        </div>
-        <div v-else-if="deepStatus.status !== 'idle'" class="dim small" style="margin-top: 8px">
-          尚未取得数据库名 / 表 / 数据样本
-        </div>
-        <el-collapse v-if="deepStatus.logs?.length" class="deep-collapse">
-          <el-collapse-item :title="`详细日志（${deepStatus.logs.length}）`">
-            <div class="log-view deep-log">
-              <div v-for="(l, i) in deepStatus.logs" :key="i">{{ l }}</div>
-            </div>
-          </el-collapse-item>
-        </el-collapse>
+      <div class="dim small" style="margin-top: 12px">
+        执行过程与结果统一记录在「证据链」；点漏洞列表的「证据链」查看。
       </div>
       <template #footer>
         <el-button @click="deepDlg = false">关闭</el-button>
@@ -335,7 +314,7 @@ const deepSummary = computed(() => {
   // 只有这些阶段产出的表/库可信。union_extract 现在只对 SQLite 启用
   // （union_extract_allowed），且错误信封已被过滤，表名可信。
   const TRUSTED_TABLE = new Set(['impact_tables', 'dump_result',
-    'union_extract', 'stop'])
+    'union_extract', 'stop', 'blind_dump'])
   const TABLE_NOISE = new Set(['mysql_fetch_array', 'phpstudy', 'expects',
     'warning', 'notice', 'deprecated', 'fatal', 'parse', 'uncaught',
     'undefined', 'stack', 'trace', 'php', 'www', 'sqli', 'labs', 'dhakkan'])
@@ -347,10 +326,37 @@ const deepSummary = computed(() => {
                                   'db_name', 'stop', 'result', 'blind_extract',
                                   'reuse', 'budget', 'unreachable'])
   let dbms = '', dbName = '', schema = '', sample = '', tables = [], extract = ''
+  let exploitPayload = ''
+  let blindPayload = ''
+  let blindConfirmPayload = ''
+  let extractExtra = [], extractQuery = ''
+  let dataPayload = '', tablesExtra = [], dumpExtra = []
   for (const ev of sorted) {
     const m = ev.meta || {}
     const c = ev.content || ''
     const stage = String(m.stage || '')
+    // 轻量盲注提取实际使用的 payload
+    if (!blindPayload && m.blind_payload) blindPayload = String(m.blind_payload)
+    if (!extractExtra.length && Array.isArray(m.extract_extra)) extractExtra = m.extract_extra
+    if (!dataPayload && m.extract_payload) dataPayload = String(m.extract_payload)
+    // 旧证据没有 meta.extract_payload：从正文里解析“取数 Payload（可复现）”
+    if (!dataPayload) {
+      const mm = c.match(/取数 Payload（可复现）\s*:\s*(.+)/)
+      if (mm) dataPayload = mm[1].trim()
+    }
+    if (!tablesExtra.length && Array.isArray(m.tables_extra)) tablesExtra = m.tables_extra
+    if (!dumpExtra.length && Array.isArray(m.dump_extra)) dumpExtra = m.dump_extra
+    if (!extractQuery && m.extract_query) extractQuery = String(m.extract_query)
+    // sqlmap 识别盲注用的检测 payload（不是取数语句）
+    if (!blindConfirmPayload) {
+      if (m.blind_confirm_payload) blindConfirmPayload = String(m.blind_confirm_payload)
+      else if (stage === 'blind_sqlmap_fallback' && m.payload) {
+        blindConfirmPayload = String(m.payload)
+      }
+    }
+    if (!exploitPayload && m.payload && stage === 'result') {
+      exploitPayload = String(m.payload)
+    }
     if (!dbms) dbms = m.dbms || ''
     if (!dbName && stage !== '' && ['impact_db_name', 'db_name', 'stop', 'result']
       .includes(stage)) dbName = m.db_name || ''
@@ -361,7 +367,7 @@ const deepSummary = computed(() => {
     if (!tables.length && TRUSTED_TABLE.has(stage) && Array.isArray(m.tables)) {
       tables = cleanTables(m.tables)
     }
-    if (!sample) sample = m.flag_sample || ''
+    if (!sample) sample = m.sample || m.flag_sample || ''
     if (!schema && TRUSTED_SCHEMA.has(stage)) {
       const mm = c.match(/current database[^:\n]*:\s*'?([\w\-.$]+)'?/i)
       if (mm) schema = mm[1]
@@ -422,18 +428,44 @@ const deepSummary = computed(() => {
     sql_injection_time: '时间盲注', sql_injection_boolean: '布尔盲注',
     sql_injection_union: 'UNION 注入', sql_injection_error: '报错注入',
   }
+  if (dataPayload && !extractExtra.length) {
+    extractExtra = ['--technique', vt === 'sql_injection_boolean' ? 'B' : 'T',
+                    '--time-sec', '2', '--current-db', '--fresh-queries']
+  }
   if (vt) lines.push(`注入类型：${VT_CN[vt] || vt}`)
   if (dbms) lines.push(`数据库类型：${dbms}`)
-  if (payload) lines.push(`确认 Payload：${payload}`)
-  if (dbName) lines.push(`数据库名：${dbName}`)
-  if (schema && schema !== dbName) lines.push(`当前库/Schema：${schema}`)
-  if (extract) {
-    lines.push(extract.startsWith('sqlmap ') ? `sqlmap 提取命令：${extract}` : `提取语句：${extract}`)
+
+  // 每个结果后面紧跟对应的 payload / sqlmap 命令，方便直接复现
+  const realDb = dbName || schema
+  if (realDb) {
+    lines.push(`数据库名：${realDb}`)
+    if (dataPayload) lines.push(`  └ 取数 Payload：${dataPayload}`)
+    if (extractExtra.length) lines.push(`  └ sqlmap 参数：${extractExtra.join(' ')}`)
+    else if (extractQuery) lines.push(`  └ 取数语句：${extractQuery}`)
   }
-  if (tables.length) lines.push(`表：${tables.join(', ')}`)
-  if (sample) lines.push(`数据样本/flag：${sample}`)
+  if (tables.length) {
+    lines.push(`表：${tables.join(', ')}`)
+    if (tablesExtra.length) lines.push(`  └ 取表 sqlmap 参数：${tablesExtra.join(' ')}`)
+  }
+  if (sample) {
+    lines.push(`数据样本/flag：${sample}`)
+    if (dumpExtra.length) lines.push(`  └ 脱裤 sqlmap 参数：${dumpExtra.join(' ')}`)
+  }
+
+  // 注入确认信息统一放最后，不打断“结果 → 对应 payload”
+  if (payload) lines.push(`扫描确认 Payload：${payload}`)
+  if (blindConfirmPayload) lines.push(`盲注检测 Payload（非取数语句）：${blindConfirmPayload}`)
+  if (blindPayload) lines.push(`盲注提取 Payload：${blindPayload}`)
+  if (exploitPayload) lines.push(`利用 Payload：${exploitPayload}`)
+  if (!realDb && extract) {
+    lines.push(extract.startsWith('sqlmap ')
+      ? `sqlmap 参数：${extract.replace(/^sqlmap\s+/, '')}`
+      : `取数语句：${extract}`)
+  }
   // 追加最新深挖结论（盲注先跑一次的结果/跳过原因），不覆盖上面的基础信息
-  if (latest && FINAL_STAGES.has(String(latest.meta?.stage || ''))) {
+  // 只有没拿到结构化结果时才追加原始结论，避免和上面的结果/payload 重复
+  if (latest && FINAL_STAGES.has(String(latest.meta?.stage || ''))
+      && !realDb && !tables.length && !sample) {
     const txt = (latest.content || '').trim()
     if (txt && !lines.some(l => l.includes(txt))) lines.push(txt)
   }
@@ -552,6 +584,22 @@ async function openDetail(row) {
   evidence.value = ev.items
   drawer.value = true
 }
+
+// 证据链抽屉打开时轮询刷新：深挖在后台跑，过程/结果应实时出现在证据链里
+let drawerTimer = null
+async function refreshEvidence() {
+  const id = activeVuln.value?.id
+  if (!id) return
+  try {
+    const { data } = await http.get(`/vuln/${id}/evidence`)
+    evidence.value = data.items
+  } catch { /* 抽屉关闭/网络抖动忽略 */ }
+}
+watch(drawer, (open) => {
+  if (drawerTimer) { clearInterval(drawerTimer); drawerTimer = null }
+  if (open) drawerTimer = setInterval(refreshEvidence, 5000)
+})
+onBeforeUnmount(() => { if (drawerTimer) clearInterval(drawerTimer) })
 
 const deepRetestId = ref(null)
 async function deepRetest(row) {
@@ -695,6 +743,7 @@ function stageLabel(s) {
     blind_extract: '盲注提取',
     blind_extract_partial: '盲注部分提取',
     blind_extract_fail: '盲注提取失败',
+    blind_dump: '盲注脱裤',
     max_steps: '达到步数上限',
     budget: '预算用尽',
     stop: '已完成',
@@ -708,12 +757,12 @@ function vstLabel(s) { return { pending_review: '待复核', confirmed: '已确�
 function vstTag(s) { return { pending_review: 'warning', confirmed: 'danger', false_positive: 'info', suspected: 'info', timeout: 'info' }[s] || 'info' }
 function evType(t) { return { payload: 'danger', request: 'primary', waf_info: 'warning',
                              chain_info: 'info', console_log: 'info', response: 'success',
-                             deep_exploit: 'warning' }[t] || 'info' }
+                             deep_exploit: 'warning', deep_trace: 'info' }[t] || 'info' }
 function evLabel(t) {
   return {
     payload: '确认 Payload', request: '请求特征', waf_info: 'WAF 画像',
     chain_info: '业务链路', console_log: 'sqlmap 输出', response: '响应样本',
-    deep_exploit: '深入利用',
+    deep_exploit: '深入利用', deep_trace: '深挖过程',
   }[t] || t
 }
 function fmtTime(iso) {

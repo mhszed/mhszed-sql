@@ -117,8 +117,15 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
                     if not payload:
                         payload = runner._extract_payload(extra.get("output") or "") or ""
                     is_union = "union" in payload.lower() or bool(extra.get("pg_union"))
-                    hits = ([{"vector": "union" if is_union else "boolean",
-                              "payload": payload,
+                    # sqlmap 确认的时间盲注：payload 含 SLEEP 或输出写明 time-based
+                    _out_low = (extra.get("output") or "").lower()
+                    is_time = ("sleep(" in (payload or "").lower()
+                               or "time-based" in _out_low)
+                    _vector = ("union" if is_union else
+                               "time" if is_time else "boolean")
+                    _vuln_type = ("sql_injection_union" if is_union else
+                                  "sql_injection_time" if is_time else "sql_injection_boolean")
+                    hits = ([{"vector": _vector, "payload": payload,
                               "criteria": ("PG-UNION 补枪确认" if extra.get("pg_union")
                                            else "SQLMap 确认注入")}]
                             if payload else None)
@@ -130,7 +137,7 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
                     _clear_suspected(db, task_id, ep.id)
                     vuln = evidence.create_vulnerability(
                         db, task_id=task_id, endpoint=ep, scan_job_id=job_sqlmap.id,
-                        vuln_type=("sql_injection_union" if is_union else "sql_injection_boolean"),
+                        vuln_type=_vuln_type,
                         title=f"SQL注入（{'PG-UNION' if extra.get('pg_union') else 'SQLMap'}确认）: {ep.method} {ep.path}",
                         dbms=extra.get("dbms"), vector_count=2, hits=hits)
                     _save_output_evidence(db, vuln, extra.get("output", ""))
@@ -244,6 +251,30 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
     return stats
 
 
+def _should_time_retry(result_class: str, output: str, ep: Endpoint, intensity: str) -> bool:
+    """是否值得补跑一次「时间盲注定向重试」。
+
+    触发条件（全部满足）：
+      · 读接口（写接口的时间盲注可能真的执行 UPDATE，自动补跑风险太高）
+      · medium/low 强度（high 本来就有 T）
+      · 常规结果为 no_vuln / inconclusive
+      · sqlmap 输出里出现过"疑似可注"信号：`appears to be ... injectable` /
+        `false positive or unexploitable` / `might be injectable`
+        —— 实测 pikachu blind_b/t：sqlmap 判 RLIKE boolean 可注后自己按误报撤销，
+        而 medium 的 BEU 又不测时间盲注，于是整条漏掉（2026-11-06）。
+    """
+    if getattr(ep, "read_write", "read") != "read":
+        return False
+    if (intensity or "medium") == "high":
+        return False
+    if result_class not in ("no_vuln", "inconclusive"):
+        return False
+    low = (output or "").lower()
+    return (("appears to be" in low and "injectable" in low)
+            or "false positive or unexploitable" in low
+            or "might be injectable" in low)
+
+
 def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
     """逐参数 SQLMap 初筛：测谁则谁带样例值，其余 query 参数置空。
 
@@ -299,6 +330,9 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
     last_job, last_class = None, "no_vuln"
     last_extra: dict = {"dbms": None, "output": "", "payload": None}
     merged_findings: dict = {}          # 跨参数累积：所有参数轮的判定并集
+    # 疑似信号是**按参数**出现的（pikachu blind_b 只在 name 上有），
+    # 必须记住那个参数，不能用最后一个参数（submit）的输出做判断。
+    time_retry_target: tuple | None = None
     for url, body, param, meta in targets:
         job = ScanJob(task_id=task_id, endpoint_id=ep.id, engine="sqlmap", round=1,
                       status="running", started_at=utcnow_iso())
@@ -357,6 +391,9 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
                       "payload": result.get("payload"), "findings": merged_findings,
                       "ai_verdict": runner.summarize_for_ai(
                           merged_findings, result.get("output_tail") or "")}
+        if _should_time_retry(result["result_class"], result.get("output_tail") or "",
+                              ep, intensity):
+            time_retry_target = (url, body, param)
         if result["result_class"] == "unreachable":
             # 连续连接失败已被 runner 主动终止：不再测下一个参数，直接交回上层停流水线。
             return job, "unreachable", last_extra
@@ -367,6 +404,48 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
                         f"轻量重测仍超时，停止该接口剩余参数: {ep.method} {ep.path}",
                         task_id=task_id, level="warn")
             return job, "timeout", last_extra
+
+    # ---- 时间盲注定向重试（2026-11-06）----
+    # 常规 BEU 初筛不含 T；若输出里出现"疑似可注"信号，补一次 --technique=T。
+    # 只做读接口、只做一次、90s 预算：避免把所有正常接口都拖慢。
+    if time_retry_target and last_class in ("no_vuln", "inconclusive"):
+        _url, _body, _param = time_retry_target
+        rjob = ScanJob(task_id=task_id, endpoint_id=ep.id, engine="sqlmap", round=2,
+                       status="running", started_at=utcnow_iso())
+        db.add(rjob)
+        db.commit()
+        bus.publish("scan", f"疑似盲注 → 时间定向重试 --technique=T（{_param or '-'}，180s）",
+                    task_id=task_id, level="warn")
+        rres = runner.run_sqlmap(
+            job_id=rjob.id, url=_url, method=ep.method, data=_body, param=_param,
+            is_write=False, intensity=intensity, timeout_s=180, dbms_hint=dbms_hint,
+            extra_args=["--technique=T", "--time-sec", "2", "--fresh-queries"],
+            exploit_mode=True, out_dir_key=f"job_{rjob.id}_time",
+        )
+        rjob.status = rres["status"]
+        rjob.result_class = rres["result_class"]
+        rjob.request_meta = {
+            "targeted": "time_blind", "pid": rres["pid"],
+            "exit_code": rres["exit_code"], "timeout_s": 180,
+            "focus_param": _param, "url": _url[:200],
+            "output_tail": (rres.get("output_tail") or "")[-1500:],
+        }
+        rjob.finished_at = utcnow_iso()
+        rjob.duration_ms = rres.get("duration_ms")
+        db.commit()
+        if rres.get("result_class") in ("vuln_confirmed", "exploit_ok"):
+            merged2 = runner.merge_findings(merged_findings, rres.get("findings") or {})
+            _pl = rres.get("payload") or runner._extract_payload(
+                rres.get("full_output") or rres.get("output_tail") or "")
+            return rjob, "vuln_confirmed", {
+                "dbms": rres.get("dbms"),
+                "output": rres.get("full_output") or rres.get("output_tail") or "",
+                "payload": _pl, "findings": merged2,
+            }
+        last_job, last_class = rjob, rres["result_class"]
+        last_extra = {"dbms": rres.get("dbms") or last_extra.get("dbms"),
+                      "output": rres.get("output_tail") or "", "payload": None,
+                      "findings": merged_findings}
 
     # sqlmap 未确认 → PG-UNION 补枪。仅当研判证据指向 PostgreSQL 才触发
     # （证据驱动的 dbms_hint；对 SQLite/MySQL 靶场跑 PG 补枪纯属浪费请求）
@@ -505,7 +584,9 @@ def _run_ai_probe_job(db: Session, task_id: int, ep: Endpoint, waf_profile,
     job.result_class = result["result_class"]
     job.ai_payloads = result["hits"]
     job.bypass_strategy = cfg.get("bypass_strategies")
-    job.request_meta = {"tried": result.get("tried"), "sqlmap_feedback": bool(sqlmap_output)}
+    job.request_meta = {"tried": result.get("tried"), "sqlmap_feedback": bool(sqlmap_output),
+                        # 布尔反证结果（None=未触发；ok=False 时已撤销确认）
+                        "counterproof": result.get("counterproof")}
     job.finished_at = utcnow_iso()
     db.commit()
     return job, result["result_class"], result

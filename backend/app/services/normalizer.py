@@ -110,6 +110,8 @@ def upsert_endpoint(
     """归一 + 去重 + 读写分类，upsert 接口。已存在则合并参数/样本头。"""
     parsed = urlparse(url)
     host = parsed.netloc.split("@")[-1]
+    # 协议必须随接口落库：探测端统一从 endpoint.scheme 拼 URL（HTTPS 目标不能再走 http）。
+    scheme = (parsed.scheme or "http").lower()
     raw_path = parsed.path or "/"
     norm_path = normalize_path(raw_path)
 
@@ -132,6 +134,8 @@ def upsert_endpoint(
         sample_headers["Referer"] = referer
 
     if existing:
+        if not existing.scheme:                    # 老数据补协议
+            existing.scheme = scheme
         existing.params = _merge_params(existing.params, params)
         if source == "burp":                       # burp 样本更真实，覆盖
             existing.headers = sample_headers or existing.headers
@@ -149,6 +153,7 @@ def upsert_endpoint(
         path=norm_path,
         raw_path=raw_path,
         host=host,
+        scheme=scheme,
         params=params or None,
         headers=sample_headers or None,
         read_write=classify_rw(method, norm_path),

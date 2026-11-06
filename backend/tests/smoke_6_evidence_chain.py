@@ -2011,8 +2011,13 @@ def _impact_report_tests():
           config.DEFAULT_SCAN_CONFIG.get("deep_use_blind_extract") is False
           and "deep_use_blind_extract" in inspect.getsource(de._run))
     run_src = inspect.getsource(de._run)
-    check("current_db 强制 --fresh-queries（不复用错误缓存）",
-          '"--current-db", "--fresh-queries"' in run_src)
+    # d71cbb6 起盲注场景**故意**不带 --fresh-queries（超时续跑要复用 session），
+    # 断言改为检查 current_db 分支同时要求 --current-db 与（非盲注时）--fresh-queries。
+    _cd_i = run_src.find('if action == "current_db":')
+    _cd_seg = run_src[_cd_i:_cd_i + 600] if _cd_i >= 0 else ""
+    check("current_db 强制 --fresh-queries（盲注例外）",
+          '"--current-db"' in _cd_seg and '"--fresh-queries"' in _cd_seg,
+          f"segment={'命中' if _cd_seg else '未找到'}")
     check("goal=schema 跳过 AI 盲注兜底",
           'goal != "schema"' in run_src and "skip_ai_blind_schema" in run_src)
     check("goal=schema 不采信 UNION 剧本解析的库/表",

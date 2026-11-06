@@ -56,6 +56,18 @@ def _migrate():
         if ccols and "param" not in ccols:
             conn.execute(text("ALTER TABLE confirmed_payloads ADD COLUMN param VARCHAR(64)"))
             conn.commit()
+        # 接口表补 scheme 列：HTTPS 目标探测时 URL 不能拼成 http（2026-11-06）。
+        # 补列后按任务目标回填一次，老数据也能走对协议；找不到任务的保持 NULL（探测端回退 http）。
+        ecols = [r[1] for r in conn.execute(text("PRAGMA table_info(endpoints)"))]
+        if ecols and "scheme" not in ecols:
+            conn.execute(text("ALTER TABLE endpoints ADD COLUMN scheme VARCHAR(8)"))
+            conn.commit()
+            conn.execute(text(
+                "UPDATE endpoints SET scheme = ("
+                "SELECT CASE WHEN lower(t.target) LIKE 'https%' THEN 'https' ELSE 'http' END "
+                "FROM tasks t WHERE t.id = endpoints.task_id) WHERE scheme IS NULL"
+            ))
+            conn.commit()
 
 
 def _seed_admin():

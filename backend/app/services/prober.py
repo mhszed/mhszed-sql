@@ -846,8 +846,98 @@ def probe_endpoint(db: Session, endpoint: Endpoint, waf_profile, safe_client: Sa
     else:
         result_class = "inconclusive"
 
+    # ---- 布尔误报复核（对标 sqlmap checkFalsePositives / SuperSQL 全量反证）----
+    # 只看布尔类命中：用一个**新的随机真假条件**再问一次。页面若没有受控布尔分支，
+    # 新旧条件都会给出相同响应 → 撤销确认。请求失败 / WAF 拦截时不撤销（避免误杀）。
+    counterproof = None
+    bool_hit = next((h for h in hits if h.get("vector") == "boolean" and h.get("payload")), None)
+    if result_class == "vuln_confirmed" and bool_hit:
+        _pl = bool_hit["payload"]
+        _false = _flip_confirmed(_pl) or _false_variant(_pl)
+        # 只在能构造「新随机等值对」时反证：复杂/不等式 payload 的假值翻转不可靠，
+        # 拿不可靠的对照组去撤销确认，会制造真漏洞漏报（宁可漏检误报，不误杀真洞）。
+        _seed = 1000 + sum(_pl.encode("utf-8", "ignore")) % 8000
+        if _false and _false != _pl and _fresh_bool_pair(_pl, _seed):
+            _ok, _detail, _reqs = _counterproof_boolean(
+                safe_client, endpoint, target_param, _pl, _false, base_key)
+            tried += _reqs
+            counterproof = {"ok": _ok, "detail": _detail, "requests": _reqs}
+            if not _ok:
+                bus.publish("scan", f"[ai_probe] 布尔反证未通过，撤销确认：{_detail}",
+                            level="warn")
+                result_class = "inconclusive"
+
     return {"result_class": result_class, "hits": hits, "tried": tried,
-            "target_param": target_param, "probe_hint": suspect_siblings}
+            "target_param": target_param, "probe_hint": suspect_siblings,
+            "counterproof": counterproof}
+
+
+def _fresh_bool_pair(payload: str, seed: int) -> tuple[str, str] | None:
+    """把 payload 里第一处「等值常量对」换成新的随机数，生成同构真/假条件。
+
+    例：`1001' AND '1'='1` → `1001' AND '5623'='5623` / `1001' AND '5623'='5624`。
+    找不到等值对（如 `(SELECT COUNT(*))>0`）返回 None —— 调用方只复核原真假对。
+    先匹配带引号形态，避免把 `'1'='1` 里的数字当裸数字处理。
+    """
+    m = re.search(r"'(\d+)'(\s*=\s*)'(\d+)", payload or "")
+    if m and m.group(1) == m.group(3):
+        head, tail, sep = payload[:m.start()], payload[m.end():], m.group(2)
+        # 只替换到第二个数字为止：原 payload 末尾可能没有闭合引号（如 `'1'='1`），
+        # 这里不能擅自补一个，否则会改变 SQL 结构。
+        return f"{head}'{seed}'{sep}'{seed}{tail}", f"{head}'{seed}'{sep}'{seed + 1}{tail}"
+    m = re.search(r"(?<![\w'])(\d+)(\s*=\s*)(\d+)(?![\w'])", payload or "")
+    if m and m.group(1) == m.group(3):
+        head, tail, sep = payload[:m.start()], payload[m.end():], m.group(2)
+        return f"{head}{seed}{sep}{seed}{tail}", f"{head}{seed}{sep}{seed + 1}{tail}"
+    return None
+
+
+def _counterproof_boolean(client, endpoint, param: str, payload: str,
+                          false_payload: str, base_key) -> tuple[bool, str, int]:
+    """布尔确认后的反证：注入 oracle 必须对**新的**真/假条件也有反应。
+
+    返回 (通过, 说明, 请求数)。保守原则：
+      · 请求异常 / 触发 WAF → 视为「未能反证」，保留原判（不误杀真漏洞）
+      · 原 true/false 响应一致，或**新随机条件**真假一阵 → 判定无受控分支，撤销
+    """
+    reqs = 0
+
+    def _send(pl: str):
+        nonlocal reqs
+        url, ps, dt = _build_request(endpoint, param, pl)
+        resp = client.request(endpoint.method, url, params=ps, data=dt, payload=pl)
+        reqs += 1
+        return resp
+
+    # 固定 seed（不用 random）：同一 payload 的复核可复现，便于回归与排障
+    seed = 1000 + sum(payload.encode("utf-8", "ignore")) % 8000
+    pair = _fresh_bool_pair(payload, seed)
+    if not pair:
+        # 构造不出新条件就不反证：复杂 payload 的假值翻转本身不可靠，
+        # 拿它撤销确认会误杀真漏洞。只在「新随机等值对」这个硬判据上反证。
+        return True, "反证未执行（无法构造新随机条件，保留原判）", 0
+    fresh_true, fresh_false = pair
+
+    try:
+        r_a, r_b = _send(payload), _send(false_payload)
+    except Exception:
+        return True, "反证未执行（请求失败，保留原判）", reqs
+    if _is_waf_block(r_a) or _is_waf_block(r_b) \
+            or r_a.status_code >= 500 or r_b.status_code >= 500:
+        return True, "反证未执行（WAF 拦截或服务端 5xx，保留原判）", reqs
+    if _page_key(r_a) == _page_key(r_b):
+        return False, "确认 payload 的 true/false 响应一致（无可控布尔分支）", reqs
+    try:
+        r_c, r_d = _send(fresh_true), _send(fresh_false)
+    except Exception:
+        return True, "反证未完成（新条件请求失败，保留原判）", reqs
+    if _is_waf_block(r_c) or _is_waf_block(r_d) \
+            or r_c.status_code >= 500 or r_d.status_code >= 500:
+        return True, "反证未完成（新条件触发 WAF 或服务端 5xx，保留原判）", reqs
+    if _page_key(r_c) == _page_key(r_d):
+        return (False, f"新随机条件 {seed}={seed} / {seed}={seed + 1} 响应一致"
+                       "（页面无受控布尔分支）", reqs)
+    return True, f"反证通过：新条件 {seed}={seed} vs {seed}={seed + 1} 仍可区分", reqs
 
 
 def _elapsed(client) -> float:
@@ -939,7 +1029,7 @@ def _build_request(endpoint: Endpoint, param: str, value: str):
     """把 payload 填进指定参数；其余 query/body 参数置空，避免干扰（如 category=1）。"""
     value = _normalize_payload(value)
     raw = (endpoint.raw_path or endpoint.path).split("?")[0]
-    url = f"http://{endpoint.host}{raw}"
+    url = f"{getattr(endpoint, 'scheme', None) or 'http'}://{endpoint.host}{raw}"
 
     query_params = {}
     data = {}
@@ -968,7 +1058,7 @@ def _build_request_keep(endpoint: Endpoint, param: str, value: str):
     """
     value = _normalize_payload(value)
     raw = (endpoint.raw_path or endpoint.path).split("?")[0]
-    url = f"http://{endpoint.host}{raw}"
+    url = f"{getattr(endpoint, 'scheme', None) or 'http'}://{endpoint.host}{raw}"
     query_params, data = {}, {}
     for p in endpoint.params or []:
         loc = p.get("location")
