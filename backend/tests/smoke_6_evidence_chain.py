@@ -492,7 +492,7 @@ def _payload_hint_tests():
           _extract_payload_hint([fake_ev("console_log", "...")]) is None)
     check("空列表返回 None", _extract_payload_hint([]) is None)
 
-    # 2026-10-23 hbc2:23201：带 /**/ 的布尔命中是抖动假阳性、闭合符还是错的单引号，
+    # 2026-10-23 某靶场：带 /**/ 的布尔命中是抖动假阳性、闭合符还是错的单引号，
     # 抢走了真正有效的双引号受控时间对 → 深挖用错语境全盘卡死。受控命中必须优先。
     rows = [fake_ev("payload", "[boolean] 1'/**/and/**/'1'='1",
                     meta={"vector": "boolean", "payload": "1'/**/and/**/'1'='1",
@@ -624,7 +624,7 @@ def _bool_pair_tests():
 
 
 def _time_pair_tests():
-    """2026-10-23 hbc2:13666 纯时间盲注靶漏检的回归。
+    """2026-10-23 某靶场 纯时间盲注靶漏检的回归。
 
     靶点：GET /check?id=1，响应恒为同一 JSON（58B），双引号闭合，
     `1" and if(1=1,sleep(3),1)#` 真值休眠。AI 只给了 boolean 向量 →
@@ -671,7 +671,7 @@ def _time_pair_tests():
           f"(实际 {len(times)})")
     check("时间对带同构 false_variant（受控对照）",
           all(p.get("false_variant") for p in times))
-    check("时间对覆盖双引号闭合（hbc2:13666 语境）",
+    check("时间对覆盖双引号闭合（某靶场 语境）",
           any(p["payload"].startswith('1" and if') for p in times),
           f"(实际 {[p['payload'][:18] for p in times]})")
     check("时间对使用参数样例值（非硬编码 1）",
@@ -696,7 +696,7 @@ def _time_pair_tests():
 
 
 def _blind_flag_tests():
-    """2026-10-23 hbc2:23201：纯时间盲注靶的 flag 直取基础能力。"""
+    """2026-10-23 某靶场：纯时间盲注靶的 flag 直取基础能力。"""
     import inspect
     from app.services import blind_extract as be
 
@@ -857,7 +857,7 @@ def _error_extract_tests():
 
 
 def _nosep_tests():
-    """2026-10-23 hbc2:35940：过滤空格/+//**//注释时，零分隔逻辑闭合与错误型回显。"""
+    """2026-10-23 某靶场：过滤空格/+//**//注释时，零分隔逻辑闭合与错误型回显。"""
     import inspect
     from app.services import prober
 
@@ -1734,7 +1734,7 @@ def _deep_exploit_p0_tests():
     check("_run 定义了 siblings 映射（PG-UNION 不再 NameError）",
           "siblings =" in run_src and "sibling_empty=siblings" in run_src)
 
-    # 2026-10-22 hbc2-17133 实测：run_pg_union 的 finally 调 close()，
+    # 2026-10-22 某靶场 实测：run_pg_union 的 finally 调 close()，
     # 但 PgUnionExploiter 从未实现 → 每次 PG-UNION 深挖都 AttributeError 丢结果。
     from app.services.pg_union_exploit import PgUnionExploiter, run_pg_union
     check("PgUnionExploiter 实现了 close()",
@@ -1751,7 +1751,7 @@ def _deep_exploit_p0_tests():
     check("_run 给字符 UNION 传接口方法与 body",
           run_src.count("method=ep.method, body_template=_fill(b_params)") >= 2)
 
-    # 2026-10-22 hbc2-17133 误报：应用层错误信封被当成回显证据（db=msg/tables=msg）
+    # 2026-10-22 某靶场 误报：应用层错误信封被当成回显证据（db=msg/tables=msg）
     from app.services import pg_union_exploit as pgu
     check("错误信封 JSON 被识别（status=error/msg）",
           pgu._looks_error('{"msg":"查询服务暂不可用","status":"error"}') is True)
@@ -1775,7 +1775,7 @@ def _deep_exploit_p0_tests():
           "server_slow" in inspect.getsource(__import__(
               "app.services.dbms_probe", fromlist=["x"]).fingerprint_dbms))
 
-    # SQLite 列名解析：hbc2-17133 的 flag 在 system_config(config_key,config_value)
+    # SQLite 列名解析：某靶场 的 flag 在 system_config(config_key,config_value)
     from app.services.ai_deep import parse_sqlite_columns
     _schema = (
         "CREATE TABLE system_config (\n"
@@ -1790,7 +1790,7 @@ def _deep_exploit_p0_tests():
           f"(实际 {_cols})")
     check("sqlite_master 解析列名（archives）",
           _cols.get("archives") == ["id", "title"], f"(实际 {_cols})")
-    # 回显是 JSON 时换行是字面量 \n（hbc2-45907 实测），也必须能解析
+    # 回显是 JSON 时换行是字面量 \n（某靶场 实测），也必须能解析
     _json_schema = ('{"data":[[1,"CREATE TABLE system_config (\\n'
                     ' config_key TEXT NOT NULL,\\n config_value TEXT NOT NULL\\n'
                     ' ),CREATE TABLE archives (\\n id INTEGER,\\n title TEXT\\n'

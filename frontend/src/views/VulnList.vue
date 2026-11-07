@@ -314,7 +314,7 @@ const deepSummary = computed(() => {
   // 只有这些阶段产出的表/库可信。union_extract 现在只对 SQLite 启用
   // （union_extract_allowed），且错误信封已被过滤，表名可信。
   const TRUSTED_TABLE = new Set(['impact_tables', 'dump_result',
-    'union_extract', 'stop', 'blind_dump'])
+    'union_extract', 'stop', 'blind_dump', 'bool_page_extract'])
   const TABLE_NOISE = new Set(['mysql_fetch_array', 'phpstudy', 'expects',
     'warning', 'notice', 'deprecated', 'fatal', 'parse', 'uncaught',
     'undefined', 'stack', 'trace', 'php', 'www', 'sqli', 'labs', 'dhakkan'])
@@ -322,12 +322,21 @@ const deepSummary = computed(() => {
     const vals = (arr || []).map(x => String(x).trim()).filter(Boolean)
     return vals.some(v => TABLE_NOISE.has(v.toLowerCase())) ? [] : vals
   }
+  // 旧解析 bug 会把 sqlmap ASCII banner 存成样本；展示层必须过滤
+  const BANNER_RE = /sqlmap\.org|\|_\|V|___|\|_ -\||\[\\.\]|\.'\|/
+  const cleanSample = (s) => {
+    const t = String(s || '')
+    if (!t || BANNER_RE.test(t)) return ''
+    return t
+  }
   const TRUSTED_SCHEMA = new Set(['impact_current_db', 'impact_db_name', 'current_db',
                                   'db_name', 'stop', 'result', 'blind_extract',
-                                  'reuse', 'budget', 'unreachable'])
-  let dbms = '', dbName = '', schema = '', sample = '', tables = [], extract = ''
+                                  'bool_page_extract', 'reuse', 'budget', 'unreachable'])
+  let dbms = '', dbName = '', schema = '', sample = '', partialSample = '', tables = [], extract = ''
   let exploitPayload = ''
   let blindPayload = ''
+  let payloadDb = '', payloadTables = '', payloadFlag = ''
+  let dbSource = ''
   let blindConfirmPayload = ''
   let extractExtra = [], extractQuery = ''
   let dataPayload = '', tablesExtra = [], dumpExtra = []
@@ -337,6 +346,11 @@ const deepSummary = computed(() => {
     const stage = String(m.stage || '')
     // 轻量盲注提取实际使用的 payload
     if (!blindPayload && m.blind_payload) blindPayload = String(m.blind_payload)
+    // 每个结果各自的取数 payload：挂在对应结果下面
+    if (!payloadDb && m.payload_db) payloadDb = String(m.payload_db)
+    if (!payloadTables && m.payload_tables) payloadTables = String(m.payload_tables)
+    if (!payloadFlag && m.payload_flag) payloadFlag = String(m.payload_flag)
+    if (!dbSource && m.db_source) dbSource = String(m.db_source)
     if (!extractExtra.length && Array.isArray(m.extract_extra)) extractExtra = m.extract_extra
     if (!dataPayload && m.extract_payload) dataPayload = String(m.extract_payload)
     // 旧证据没有 meta.extract_payload：从正文里解析“取数 Payload（可复现）”
@@ -367,7 +381,9 @@ const deepSummary = computed(() => {
     if (!tables.length && TRUSTED_TABLE.has(stage) && Array.isArray(m.tables)) {
       tables = cleanTables(m.tables)
     }
-    if (!sample) sample = m.sample || m.flag_sample || ''
+    if (!sample) sample = cleanSample(m.sample || m.flag_sample || '')
+    // 超时前已复核的部分结果：单独展示，明确标注未完整
+    if (!partialSample && m.flag_partial) partialSample = String(m.flag_partial)
     if (!schema && TRUSTED_SCHEMA.has(stage)) {
       const mm = c.match(/current database[^:\n]*:\s*'?([\w\-.$]+)'?/i)
       if (mm) schema = mm[1]
@@ -439,23 +455,40 @@ const deepSummary = computed(() => {
   const realDb = dbName || schema
   if (realDb) {
     lines.push(`数据库名：${realDb}`)
-    if (dataPayload) lines.push(`  └ 取数 Payload：${dataPayload}`)
-    if (extractExtra.length) lines.push(`  └ sqlmap 参数：${extractExtra.join(' ')}`)
-    else if (extractQuery) lines.push(`  └ 取数语句：${extractQuery}`)
+    if (payloadDb) {
+      lines.push(`  └ 取库 Payload：${payloadDb}`)
+    } else if (dbSource && dbSource !== 'sqlmap') {
+      // 复用的/布尔对比提取的库名，不能冒充 sqlmap --current-db
+      lines.push('  └ 库名来源：布尔页面对比 / 历史复用')
+    } else {
+      if (dataPayload) lines.push(`  └ 取数 Payload：${dataPayload}`)
+      if (extractExtra.length) lines.push(`  └ sqlmap 参数：${extractExtra.join(' ')}`)
+      else if (extractQuery) lines.push(`  └ 取数语句：${extractQuery}`)
+    }
   }
   if (tables.length) {
     lines.push(`表：${tables.join(', ')}`)
+    if (payloadTables) lines.push(`  └ 取表 Payload：${payloadTables}`)
     if (tablesExtra.length) lines.push(`  └ 取表 sqlmap 参数：${tablesExtra.join(' ')}`)
   }
   if (sample) {
     lines.push(`数据样本/flag：${sample}`)
+    if (payloadFlag) lines.push(`  └ 取 flag Payload（逐字符示例）：${payloadFlag}`)
     if (dumpExtra.length) lines.push(`  └ 脱裤 sqlmap 参数：${dumpExtra.join(' ')}`)
+  }
+  if (partialSample && !sample) {
+    lines.push(`数据样本/flag（部分，未完整，下次可续跑）：${partialSample}`)
+    if (payloadFlag) lines.push(`  └ 取 flag Payload：${payloadFlag}`)
+    lines.push('提示：再次点击「深入利用」将从断点续跑，不会从头提取')
   }
 
   // 注入确认信息统一放最后，不打断“结果 → 对应 payload”
   if (payload) lines.push(`扫描确认 Payload：${payload}`)
   if (blindConfirmPayload) lines.push(`盲注检测 Payload（非取数语句）：${blindConfirmPayload}`)
-  if (blindPayload) lines.push(`盲注提取 Payload：${blindPayload}`)
+  // 有分步 payload 时不再重复一条笼统的“盲注提取 Payload”
+  if (blindPayload && !payloadDb && !payloadTables && !payloadFlag) {
+    lines.push(`盲注提取 Payload：${blindPayload}`)
+  }
   if (exploitPayload) lines.push(`利用 Payload：${exploitPayload}`)
   if (!realDb && extract) {
     lines.push(extract.startsWith('sqlmap ')
@@ -520,6 +553,13 @@ const deepResultRows = computed(() => {
   const _tables = _tableVals.some(t => _noise.includes(t.toLowerCase())) ? [] : _tableVals
   if (_tables.length) rows.push({ label: '表', value: _tables.join(', ') })
   if (r.sample) rows.push({ label: '数据样本/flag', value: r.sample })
+  if (r.sample_partial && !r.sample) {
+    rows.push({ label: '数据样本/flag（部分，未完整）', value: r.sample_partial })
+  }
+  if (r.db_partial) rows.push({ label: '库名（部分，未完整）', value: r.db_partial })
+  if (r.retryable) {
+    rows.push({ label: '提示', value: r.resume_hint || '本次未完整，可再次点击「深入利用」重试' })
+  }
   return rows
 })
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """doublekeywords：把 WAF 会删除一次的 SQL 关键字写成双份。
 
-2026-10-19 hbc2:49920 实测：靶场把 select/from/union/where 各删除一次
+2026-10-19 某靶场 实测：靶场把 select/from/union/where 各删除一次
 （`(SELECT/**/COUNT(*)/**/FROM/**/sqlite_master)` → `(/**/COUNT(*)/**//**/sqlite_master)`）。
 双写后：`SELSELECTECT` 被删一次仍得 `SELECT`。
 

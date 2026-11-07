@@ -48,6 +48,15 @@ def main():
               EP_READ, "medium") is True)
 
     src = inspect.getsource(scheduler._run_sqlmap_job)
+    # 2026-11-07：超时但 runner 已升级 vuln_confirmed 时，重测会覆盖 result
+    # 把已确认的盲注丢掉（某靶场 实测）。守卫必须排除已确认类。
+    _guard_at = src.find('result.get("status") == "timeout"')
+    _retry_at = src.find("SQLMap 超时，改用轻量策略重测一次")
+    check("超时但已确认 → 不触发轻量重测（防覆盖已确认结果）",
+          _guard_at != -1
+          and 'not in ("vuln_confirmed", "exploit_ok")' in src[_guard_at:_guard_at + 240])
+    check("轻量重测日志位于守卫之后（确认时不会执行）",
+          -1 < _guard_at < _retry_at)
     check("重试按参数记录疑似信号",
           "time_retry_target = (url, body, param)" in src)
     check("重试使用可疑参数而不是第一个/最后一个",

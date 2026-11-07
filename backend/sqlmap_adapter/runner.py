@@ -35,7 +35,7 @@ _MAX_HOST_WAIT_S = 600
 _SQLMAP_DELAY_S = "0.5"
 
 # 连续连接失败阈值：达到即主动终止 sqlmap。
-# 2026-10-22 实测 hbc2:33549：目标进入 SYN_SENT 后 sqlmap 仍按 --retries 3 反复重试，
+# 2026-10-22 实测 某靶场：目标进入 SYN_SENT 后 sqlmap 仍按 --retries 3 反复重试，
 # 深挖的 tables 步硬等满 900s，继续对已不可达的目标施压。实战中这会把目标彻底打挂。
 _CONN_FAIL_ABORT = 4
 _RE_CONN_FAIL = re.compile(
@@ -380,7 +380,7 @@ def _exploit_produced(output: str) -> bool:
     """利用模式是否真的产出了战果。
 
     ⚠️ 不能把 sqlmap 恢复 session 时打印的 `current database:` / `Database:` 当战果：
-    2026-10-22 hbc2 job#13 只恢复了会话、随后连接超时、一张表都没拿到，
+    2026-10-22 某靶场 job#13 只恢复了会话、随后连接超时、一张表都没拿到，
     却因这两行被判 exploit_ok（假成功）。只认数据类标记。
     """
     low = (output or "").lower()

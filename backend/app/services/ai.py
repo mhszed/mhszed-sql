@@ -717,6 +717,18 @@ _TIME_PAIR_TEMPLATES = [
      "{v} and if(1=2,sleep({t}),1)-- -"),
 ]
 
+# 布尔盲注确定性成对模板（(真值, 假值)）——**不依赖 AI 生成**。
+# 与时间对同理：配置了 AI 时，布尔覆盖完全取决于模型临场输出；实测
+# 2026-11-07 数字型布尔盲注（id=1 and 1=1 / 1=2）AI 未生成对应形态 →
+# 研判/探测阶段整条漏检，只能靠 sqlmap 兜底。
+# 这里按常见闭合语境各补一对（数字 / 单引号 / 双引号），true 应≈基线，
+# false 应显著不同；prober 的受控布尔对判据可直接确认。
+_BOOL_PAIR_TEMPLATES = [
+    ("{v} and 1=1", "{v} and 1=2"),
+    ("{v}' and '1'='1'-- -", "{v}' and '1'='2'-- -"),
+    ('{v}" and "1"="1"-- -', '{v}" and "1"="2"-- -'),
+]
+
 
 def _clip_verdict(text: str | None, limit: int = 1400) -> str | None:
     """截断 sqlmap 反馈。结构化摘要（关键行在前）保头；原始输出保尾。
@@ -830,11 +842,25 @@ def generate_payloads(db: Session, endpoint: Endpoint, waf_profile,
             payloads.append({"payload": k.payload, "vector": k.vector,
                              "expected_criteria": f"知识库回流样本（成功 {k.success_count} 次）"})
 
+    # ---- 布尔盲注确定性成对探针（永远追加，不依赖 AI/降级分支）----
+    # 配置 AI 时布尔 payload 全靠模型临场生成，形态不可控（2026-11-07 数字型
+    # 布尔盲注整条漏检）。按常见语境各补一对，保证布尔向量的确定性覆盖。
+    seen = {p["payload"] for p in payloads}
+    for true_tpl, false_tpl in _BOOL_PAIR_TEMPLATES:
+        bp = true_tpl.format(v=base_value)
+        fp = false_tpl.format(v=base_value)
+        if bp in seen:
+            continue
+        seen.add(bp)
+        payloads.append({
+            "payload": bp, "vector": "boolean", "false_variant": fp,
+            "expected_criteria": "受控布尔对：true 注入应≈基线，false 应显著不同",
+        })
+
     # ---- 时间盲注确定性成对探针（永远追加，不依赖 AI/降级分支）----
     # 只追加一次；真值`sleep`、假值同型不休眠 → prober 可做受控对照（单向量即强证据）。
     max_delay = config.DEFAULT_SCAN_CONFIG.get("time_based_max_delay_s", 5)
     sleep_s = min(3, max_delay)
-    seen = {p["payload"] for p in payloads}
     for true_tpl, false_tpl in _TIME_PAIR_TEMPLATES:
         tp = true_tpl.format(v=base_value, t=sleep_s)
         fp = false_tpl.format(v=base_value, t=sleep_s)

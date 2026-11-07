@@ -29,3 +29,6 @@ _*.txt
 
 # 内部开发台账（含靶场目标情报，不入公开仓库）
 DEVELOPMENT-PROGRESS.md
+
+# 本地开发记忆（含靶场目标情报，不入公开仓库）
+_dev-memory/

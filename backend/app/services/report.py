@@ -78,7 +78,7 @@ def _test_url(task: Task, e: Endpoint) -> str:
 # 只有这些阶段产出的表信息可信；union_extract / ai_char_union 在非 SQLite
 # 靶点上会把 PHP 报错页单词当表名（Less-23 实测），不得进入报告。
 # stop/result 只是状态汇总，可能把旧的脏 state 再带一遍，也不可信。
-_TRUSTED_TABLE_STAGES = {"impact_tables", "dump_result"}
+_TRUSTED_TABLE_STAGES = {"impact_tables", "dump_result", "bool_page_extract", "blind_dump"}
 
 # 表名列表里一旦出现 PHP 报错特征，整份列表都判为噪声（而不是只删几个词）。
 _TYPE_CN = {
@@ -91,6 +91,18 @@ _SEV_CN = {"critical": "严重", "high": "高危", "medium": "中危", "low": "�
 _STATUS_CN = {"pending_review": "待复核", "confirmed": "已确认",
               "false_positive": "误报", "suspected": "疑似未确认",
               "timeout": "探测超时未完成"}
+
+def _dbms_display(v, deep_payloads: dict, tables) -> str:
+    """DBMS 未知但提取语句明显是 MySQL 时，报告标注为推断结果。"""
+    d = str(getattr(v, "dbms", "") or "").strip()
+    if d and d not in ("-", "未知", "unknown"):
+        return d
+    blob = " ".join([deep_payloads.get("db", ""), deep_payloads.get("tables", ""),
+                     " ".join(tables or [])]).lower()
+    if "database()" in blob or "information_schema" in blob:
+        return "MySQL（据提取语句推断）"
+    return "未知"
+
 
 _TABLE_ERROR_TOKENS = {
     "mysql_fetch_array", "phpstudy", "expects", "warning", "notice",
@@ -105,8 +117,8 @@ def _clean_tables(items) -> list[str]:
         return []
     return vals
 _TRUSTED_SCHEMA_STAGES = {"impact_current_db", "impact_db_name", "current_db",
-                          "db_name", "stop", "result", "blind_extract", "reuse",
-                          "budget", "unreachable"}
+                          "db_name", "stop", "result", "blind_extract",
+                          "bool_page_extract", "reuse", "budget", "unreachable"}
 
 
 def _deep_score(ev) -> int:
@@ -132,7 +144,8 @@ def _deep_facts(evids) -> tuple[str, list[str], str]:
     deep_exploit 的 `current_database()` 步骤补取；两者都有时显示
     `appdb (schema=public)`。
     """
-    db_name, schema, tables, sample = "", "", [], ""
+    db_name, schema, tables = "", "", []
+    sample_complete, sample_partial = "", ""
     deeps = sorted([e for e in evids if e.evidence_type == "deep_exploit"],
                    key=lambda e: (_deep_score(e), getattr(e, "seq", 0)),
                    reverse=True)
@@ -173,16 +186,51 @@ def _deep_facts(evids) -> tuple[str, list[str], str]:
                 if m:
                     tables = _clean_tables(x.strip().strip("'\"")
                                            for x in m.group(1).split(","))
-        if not sample:
-            sample = meta.get("flag_sample") or ""
-            if not sample:
+        # 完整 flag 优先；超时前缀单独保留，报告中明确标注“部分、可续跑”
+        if not sample_complete:
+            if meta.get("flag"):
+                sample_complete = str(meta["flag"])
+            elif meta.get("flag_sample"):
+                sample_complete = str(meta["flag_sample"])
+            else:
                 m = re.search(r"flag\{[^}]+\}", text, re.I)
                 if m:
-                    sample = m.group(0)
+                    sample_complete = m.group(0)
+        if (not sample_complete and not sample_partial
+                and meta.get("flag_partial")):
+            sample_partial = str(meta["flag_partial"])
+    sample = sample_complete or (
+        f"{sample_partial}（部分，未完整，可续跑）" if sample_partial else "")
     display = db_name or schema
     if db_name and schema and db_name != schema:
         display = f"{db_name} (schema={schema})"
     return display, tables, sample
+
+
+def _is_control_payload(p) -> bool:
+    """值预测的否条件（如 `='flag__x'`）不是取数 payload，报告不能展示。"""
+    return "__x" in str(p or "")
+
+
+def _deep_payloads(evids) -> dict:
+    """取最新一次深挖的分步取数 payload（库/表/flag）与库名来源。"""
+    out = {"db": "", "tables": "", "flag": "", "db_source": ""}
+    deeps = sorted([e for e in evids if e.evidence_type == "deep_exploit"],
+                   key=lambda e: getattr(e, "seq", 0), reverse=True)
+    for ev in deeps:
+        meta = ev.meta or {}
+        if not out["db"] and meta.get("payload_db") \
+                and not _is_control_payload(meta.get("payload_db")):
+            out["db"] = str(meta["payload_db"])
+        if not out["tables"] and meta.get("payload_tables") \
+                and not _is_control_payload(meta.get("payload_tables")):
+            out["tables"] = str(meta["payload_tables"])
+        if not out["flag"] and meta.get("payload_flag") \
+                and not _is_control_payload(meta.get("payload_flag")):
+            out["flag"] = str(meta["payload_flag"])
+        if not out["db_source"] and meta.get("db_source"):
+            out["db_source"] = str(meta["db_source"])
+    return out
 
 
 def _deep_extra(evids) -> str:
@@ -204,6 +252,17 @@ def _deep_extract(evids) -> str:
     deeps = sorted([e for e in evids if e.evidence_type == "deep_exploit"],
                    key=lambda e: (_deep_score(e), getattr(e, "seq", 0)),
                    reverse=True)
+    # 新证据记录了库名来源：复用/布尔对比取到的库名，不能标成 sqlmap --current-db
+    for ev in deeps:
+        meta = ev.meta or {}
+        src = meta.get("db_source")
+        if src and src != "sqlmap":
+            return ""
+        # 有布尔页面对比证据（且它拿到了库/表/flag）→ 库名不是 sqlmap current-db
+        if (str(meta.get("stage") or "") == "bool_page_extract"
+                and (meta.get("payload_db") or meta.get("payload_tables")
+                     or meta.get("flag") or meta.get("flag_partial"))):
+            return ""
     # 1) 优先：任何一条证据里记录的 sqlmap 参数（extract_extra / extra）
     for ev in deeps:
         meta = ev.meta or {}
@@ -238,7 +297,25 @@ def _payload_texts(evids) -> list[str]:
     超时升级为 vuln_confirmed 的旧数据可能没有 payload 证据行，
     但 console_log / deep_exploit 里的 `Payload:` 行仍然可用。
     """
-    payloads = [x.content for x in evids if x.evidence_type == "payload"]
+    # 只取 payload 证据的第一行（后面可能是“预期判据”等说明，不当 payload）
+    payloads = []
+    for x in evids:
+        if x.evidence_type != "payload":
+            continue
+        lines = [ln.strip() for ln in (x.content or "").splitlines() if ln.strip()]
+        if lines:
+            payloads.append(lines[0])
+    # 扫描阶段没留 payload 证据时，用深挖记录里的确认/取数 payload 兜底
+    if not payloads:
+        for ev in evids:
+            meta = ev.meta or {}
+            for key in ("blind_confirm_payload", "payload"):
+                v = meta.get(key)
+                if v:
+                    payloads.append(str(v))
+                    break
+            if payloads:
+                break
     if not payloads:
         for ev in evids:
             m = re.search(r"^\s*Payload:\s*(.+)$", ev.content or "", re.I | re.M)
@@ -302,6 +379,8 @@ def _vuln_lines(task, vulns, db: Session) -> list[str]:
                  .order_by(Evidence.seq.asc()).all())
         payloads = _payload_texts(evids)
         db_name, tables, sample = _deep_facts(evids)
+        deep_payloads = _deep_payloads(evids)
+        dbms_disp = _dbms_display(v, deep_payloads, tables)
         extract_query = _deep_extract(evids)
         key_lines = _key_evidence(evids)
         cmd_extra = _deep_extra(evids)
@@ -316,20 +395,30 @@ def _vuln_lines(task, vulns, db: Session) -> list[str]:
             f"测试URL: {test_url}",
             f"请求方法: {e.method}",
             f"参数: {e.params}",
-            f"数据库类型: {v.dbms or '未知'}   命中向量数: {v.vector_count}",
+            f"数据库类型: {dbms_disp}   命中向量数: {v.vector_count}",
             "确认 Payload:",
         ]
         if payloads:
             lines += [f"  {p[:500]}" for p in payloads[:3]]
         else:
-            lines.append("  （无）")
+            lines.append("  （扫描阶段未记录确认 Payload；"
+                         "见影响证明中的取数 Payload）")
 
         lines.append("影响证明:")
         lines.append(f"  - 注入类型: {_TYPE_CN.get(v.vuln_type, v.vuln_type)}"
-                     f"（数据库类型={v.dbms or '未知'}）")
+                     f"（数据库类型={dbms_disp}）")
         lines.append(f"  - 当前库/schema: {db_name or '（未取得）'}")
+        if deep_payloads["db"]:
+            lines.append(f"      取库 Payload: {deep_payloads['db'][:600]}")
+        elif db_name and deep_payloads["db_source"] not in ("", "sqlmap"):
+            lines.append("      库名来源: 布尔页面对比 / 历史复用")
         lines.append(f"  - 表: {', '.join(tables) if tables else '（未取得）'}")
+        if deep_payloads["tables"]:
+            lines.append(f"      取表 Payload: {deep_payloads['tables'][:600]}")
         lines.append(f"  - 数据样本/flag: {sample or '（未取得）'}")
+        if deep_payloads["flag"]:
+            lines.append(f"      取 flag Payload（逐字符示例）: "
+                         f"{deep_payloads['flag'][:600]}")
 
         lines.append("获取过程:")
         lines.append(f"  - 测试URL: {test_url}")
@@ -349,7 +438,7 @@ def _vuln_lines(task, vulns, db: Session) -> list[str]:
 
         lines.append("结论:")
         _concl = (f"  已确认 {_TYPE_CN.get(v.vuln_type, v.vuln_type)}"
-                  f"（{v.dbms or '未知'}），当前库/schema={db_name or '未取得'}")
+                  f"（{dbms_disp}），当前库/schema={db_name or '未取得'}")
         if tables:
             _concl += f"，表={', '.join(tables)}"
         if sample:

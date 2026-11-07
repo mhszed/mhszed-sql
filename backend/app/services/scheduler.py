@@ -346,8 +346,16 @@ def _run_sqlmap_job(db: Session, task_id: int, ep: Endpoint, cfg: dict):
         )
         # 超时策略：多数超时是时间盲注重查询拖的。先禁用时间盲注、
         # 延长 120s 轻量重测一次；仍超时才停止该接口剩余参数。
+        # ⚠️ 超时被掐死前 sqlmap 可能已识别注入点（runner 会升级为
+        # result_class=vuln_confirmed）。此时不能重测：重测会覆盖 result，
+        # 把已确认结果丢掉（2026-11-07 某靶场 实测，布尔盲注已确认
+        # 却被轻量重测的 unreachable 覆盖，漏洞 0 条）。
         retried_light = False
-        if result.get("status") == "timeout":
+        if (result.get("status") == "timeout"
+                and result.get("result_class") not in ("vuln_confirmed", "exploit_ok")):
+            # 首轮已产出的判定先并入，避免重测覆盖时丢失
+            merged_findings = runner.merge_findings(
+                merged_findings, result.get("findings") or {})
             bus.publish("scan",
                         f"SQLMap 超时，改用轻量策略重测一次（禁时延盲注）: {param or '-'}",
                         task_id=task_id, level="warn")
