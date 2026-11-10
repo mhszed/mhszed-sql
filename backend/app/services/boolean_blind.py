@@ -583,11 +583,14 @@ def run_boolean_fallback(url: str, param: str, task_id: int | None = None,
                 fr = ex.extract_flag(resume=flag_resume)
                 flag_meta = fr
                 flag_err = fr.get("error") or ""
-                p_flag = ex.last_payload or ""
                 if fr.get("value") and not fr.get("partial") and not fr.get("error"):
                     flag = fr["value"]        # 只有完整且无错才当 flag
                 else:
                     flag_partial = fr.get("value") or ""
+                # 只有真的取到 flag/部分 flag 时，最后一条 payload 才是取 flag payload；
+                # 没有结果时 ex.last_payload 可能是取表/取列的语句，不能挂到 flag 下面
+                if flag or flag_partial:
+                    p_flag = ex.last_payload or ""
             return {
                 "db": dbname, "tables": tables, "requests": ex.requests,
                 "quote_style": style, "db_partial": db_partial,

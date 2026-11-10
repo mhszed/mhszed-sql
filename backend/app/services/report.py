@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """PDF 报告导出：含测试 URL、Payload、影响证明与深入利用结果。"""
+import datetime
+import json
 import re
 from pathlib import Path
 
@@ -23,6 +25,51 @@ def find_cjk_font() -> str | None:
         if Path(f).exists():
             return f
     return None
+
+
+def _fmt_local_time(iso: str | None) -> str:
+    """UTC ISO → 本地时间，报告里不显示原始 T...Z。"""
+    if not iso:
+        return "-"
+    try:
+        dt = datetime.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(iso)
+
+
+def _fmt_params(params) -> str:
+    """把接口参数从 Python 原始结构格式化成 `id(query), Submit(query)`。"""
+    if not params:
+        return "（无）"
+    parts = []
+    for p in params:
+        if isinstance(p, dict):
+            name = p.get("name") or ""
+            loc = p.get("location") or ""
+            parts.append(f"{name}({loc})" if loc else str(name))
+        else:
+            parts.append(str(p))
+    return ", ".join(parts)
+
+
+def _fmt_block_behavior(raw) -> str:
+    """WAF 拦截行为：JSON 原文只保留模式与说明，不打印整个字典。"""
+    if not raw:
+        return ""
+    try:
+        d = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(d, dict):
+            mode = str(d.get("mode") or "").strip()
+            note = str(d.get("note") or "").strip()
+            if mode and note:
+                return f"模式={mode}；{note}"
+            return note or mode or ""
+    except Exception:
+        pass
+    return str(raw)[:200]
 
 
 def build_report(db: Session, task_id: int) -> Path:
@@ -52,12 +99,20 @@ def _waf_lines(db: Session, task_id: int) -> list[str]:
     lines = ["", "━━━ WAF 画像 ━━━",
              f"产品: {row.product or 'unknown'}"
              f"（置信度 {row.product_confidence or 0}）"]
-    if row.block_behavior:
-        lines.append(f"拦截行为: {row.block_behavior}")
+    behavior = _fmt_block_behavior(row.block_behavior)
+    if behavior:
+        lines.append(f"拦截行为: {behavior}")
     if row.bypass_suggestions:
         lines.append(f"建议绕过策略: {row.bypass_suggestions}")
     if row.probe_history:
-        lines.append(f"探测记录: {str(row.probe_history)[:400]}")
+        # 原始探针明细（含 URL/状态/长度）对报告读者是噪音，只给条数
+        try:
+            ph = (json.loads(row.probe_history)
+                  if isinstance(row.probe_history, str) else row.probe_history)
+            n = len(ph) if isinstance(ph, (list, dict)) else 0
+        except Exception:
+            n = 0
+        lines.append(f"探测记录: {n} 条（原始明细略）" if n else "探测记录: 已记录（明细略）")
     return lines
 
 
@@ -222,6 +277,28 @@ def _deep_payloads(evids) -> dict:
         if not out["db"] and meta.get("payload_db") \
                 and not _is_control_payload(meta.get("payload_db")):
             out["db"] = str(meta["payload_db"])
+        # sqlmap 回退取库时，取库 payload 记在 extract_payload
+        ep = meta.get("extract_payload")
+        if not out["db"] and ep and not _is_control_payload(ep):
+            _ep = str(ep)
+            if "database()" in _ep.lower() or "current_database" in _ep.lower():
+                out["db"] = _ep
+        # 轻量盲注（取当前库名）把 payload 记在 blind_payload，不能丢；
+        # 历史证据里可能混入取表/取列的 payload，优先选含 database()/current_database 的
+        bp = meta.get("blind_payload")
+        if (bp and str(meta.get("stage") or "") == "blind_extract"
+                and "当前库名" in (ev.content or "")
+                and not _is_control_payload(bp)):
+            bp = str(bp)
+            # 取表/取列 payload 里也会出现 database()（table_schema=database()），
+            # 真正的取库 payload 不含 information_schema
+            def _is_real_db_payload(p: str) -> bool:
+                p = str(p or "")
+                return ("information_schema" not in p.lower()
+                        and ("database()" in p or "current_database" in p.lower()))
+            if not out["db"] or (_is_real_db_payload(bp)
+                                 and not _is_real_db_payload(out["db"])):
+                out["db"] = bp
         if not out["tables"] and meta.get("payload_tables") \
                 and not _is_control_payload(meta.get("payload_tables")):
             out["tables"] = str(meta["payload_tables"])
@@ -231,6 +308,33 @@ def _deep_payloads(evids) -> dict:
         if not out["db_source"] and meta.get("db_source"):
             out["db_source"] = str(meta["db_source"])
     return out
+
+
+def _deep_cmd(evids, key: str) -> str:
+    """取某类操作的 sqlmap 参数（tables_extra / dump_extra），供结果下面展示。"""
+    for ev in sorted([e for e in evids if e.evidence_type == "deep_exploit"],
+                     key=lambda e: getattr(e, "seq", 0), reverse=True):
+        extra = (ev.meta or {}).get(key)
+        if isinstance(extra, list) and extra:
+            return " ".join(str(x) for x in extra)
+    return ""
+
+
+def _db_source_label(evids) -> str:
+    """库名的真实来源：自研布尔提取 / 历史上 sqlmap 回退 / 布尔页面对比。"""
+    deeps = sorted([e for e in evids if e.evidence_type == "deep_exploit"],
+                   key=lambda e: getattr(e, "seq", 0), reverse=True)
+    for ev in deeps:
+        c = ev.content or ""
+        m = ev.meta or {}
+        stage = str(m.get("stage") or "")
+        if "轻量盲注提取到当前库名" in c:
+            return "布尔盲注逐字符提取"
+        if stage == "blind_sqlmap_fallback" and (m.get("db") or "取到当前库名" in c):
+            return "历史复用（原始来源 sqlmap）"
+        if stage == "bool_page_extract" and (m.get("db") or m.get("payload_db")):
+            return "布尔页面对比提取"
+    return "历史复用"
 
 
 def _deep_extra(evids) -> str:
@@ -363,7 +467,7 @@ def _vuln_lines(task, vulns, db: Session) -> list[str]:
     lines = [
         f"任务: {task.name}  (#{task.id})",
         f"目标: {task.target}",
-        f"状态: {task.status}    生成时间: {task.updated_at or task.created_at}",
+        f"状态: {task.status}    生成时间: {_fmt_local_time(task.updated_at or task.created_at)}",
         # 疑似未确认 / 探测超时都不计入漏洞总数，单独列出，避免污染正式结论
         f"漏洞总数: {len(vulns) - suspected_n - timeout_n}  (confirmed={sum(1 for v, _ in vulns if v.status == 'confirmed')},"
         f" pending_review={sum(1 for v, _ in vulns if v.status == 'pending_review')},"
@@ -394,7 +498,7 @@ def _vuln_lines(task, vulns, db: Session) -> list[str]:
             f"接口: {e.method} {e.host}{e.raw_path or e.path}",
             f"测试URL: {test_url}",
             f"请求方法: {e.method}",
-            f"参数: {e.params}",
+            f"参数: {_fmt_params(e.params)}",
             f"数据库类型: {dbms_disp}   命中向量数: {v.vector_count}",
             "确认 Payload:",
         ]
@@ -410,20 +514,30 @@ def _vuln_lines(task, vulns, db: Session) -> list[str]:
         lines.append(f"  - 当前库/schema: {db_name or '（未取得）'}")
         if deep_payloads["db"]:
             lines.append(f"      取库 Payload: {deep_payloads['db'][:600]}")
+            if deep_payloads["db_source"] not in ("", "sqlmap"):
+                lines.append(f"      库名来源: {_db_source_label(evids)}")
         elif db_name and deep_payloads["db_source"] not in ("", "sqlmap"):
-            lines.append("      库名来源: 布尔页面对比 / 历史复用")
+            lines.append(f"      库名来源: {_db_source_label(evids)}")
         lines.append(f"  - 表: {', '.join(tables) if tables else '（未取得）'}")
         if deep_payloads["tables"]:
             lines.append(f"      取表 Payload: {deep_payloads['tables'][:600]}")
+        elif tables:
+            _tcmd = _deep_cmd(evids, "tables_extra")
+            if _tcmd:
+                lines.append(f"      取表 Payload（sqlmap 参数）: {_tcmd[:600]}")
         lines.append(f"  - 数据样本/flag: {sample or '（未取得）'}")
-        if deep_payloads["flag"]:
+        # 只有真的取到样本时才展示 flag 取数 payload，避免把表/列 payload 挂错位置
+        if deep_payloads["flag"] and sample:
             lines.append(f"      取 flag Payload（逐字符示例）: "
                          f"{deep_payloads['flag'][:600]}")
+        elif not sample:
+            _dcmd = _deep_cmd(evids, "dump_extra")
+            if _dcmd:
+                lines.append(f"      脱裤 Payload（sqlmap 参数）: {_dcmd[:600]}")
 
         lines.append("获取过程:")
         lines.append(f"  - 测试URL: {test_url}")
-        lines.append(f"  - 请求方法: {e.method}   参数: "
-                     f"{[p.get('name') for p in (e.params or [])]}")
+        lines.append(f"  - 请求方法: {e.method}   参数: {_fmt_params(e.params)}")
         if extract_query:
             _label = ("sqlmap 提取命令" if extract_query.startswith("sqlmap ")
                       else "提取语句")

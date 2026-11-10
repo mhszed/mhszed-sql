@@ -167,7 +167,7 @@
               <el-tag size="small" :type="evType(ev.evidence_type)">{{ evLabel(ev.evidence_type) }}</el-tag>
               <span v-if="ev.meta?.stage" class="ev-stage mono">stage={{ ev.meta.stage }}</span>
             </div>
-            <pre class="ev-content mono">{{ ev.content }}</pre>
+            <pre class="ev-content mono">{{ prettyEvContent(ev.content) }}</pre>
             <div class="ev-foot dim small">sha256: {{ ev.sha256?.slice(0, 16) }}…</div>
           </div>
         </el-timeline-item>
@@ -184,7 +184,7 @@
                   <el-tag size="small" :type="evType(ev.evidence_type)">{{ evLabel(ev.evidence_type) }}</el-tag>
                   <span v-if="ev.meta?.stage" class="ev-stage mono">stage={{ ev.meta.stage }}</span>
                 </div>
-                <pre class="ev-content mono">{{ ev.content }}</pre>
+                <pre class="ev-content mono">{{ prettyEvContent(ev.content) }}</pre>
                 <div class="ev-foot dim small">sha256: {{ ev.sha256?.slice(0, 16) }}…</div>
               </div>
             </el-timeline-item>
@@ -333,10 +333,14 @@ const deepSummary = computed(() => {
                                   'db_name', 'stop', 'result', 'blind_extract',
                                   'bool_page_extract', 'reuse', 'budget', 'unreachable'])
   let dbms = '', dbName = '', schema = '', sample = '', partialSample = '', tables = [], extract = ''
+  let dumpTried = false, dumpHasSample = false
   let exploitPayload = ''
   let blindPayload = ''
   let payloadDb = '', payloadTables = '', payloadFlag = ''
   let dbSource = ''
+  let dbViaSqlmapHistory = false
+  let blindExtractDb = false
+  let blindDbPayload = ''
   let blindConfirmPayload = ''
   let extractExtra = [], extractQuery = ''
   let dataPayload = '', tablesExtra = [], dumpExtra = []
@@ -344,6 +348,30 @@ const deepSummary = computed(() => {
     const m = ev.meta || {}
     const c = ev.content || ''
     const stage = String(m.stage || '')
+    // 脱裤阶段：记录是否真的尝试过 dump、是否拿到样本（用于提示“未取到样本”）
+    if (stage === 'blind_dump') {
+      if (m.table) dumpTried = true
+      if (m.sample) dumpHasSample = true
+    }
+    // 库名如果历史上是 sqlmap 回退取的，来源标注要还原真实出处
+    if (stage === 'blind_sqlmap_fallback' && (m.db || /取到当前库名/.test(c))) {
+      dbViaSqlmapHistory = true
+    }
+    // 库名由自研布尔提取拿到（不是 sqlmap）：来源要标注为逐字符提取
+    if (/轻量盲注提取到当前库名/.test(c)) blindExtractDb = true
+    // 取库 payload 只认「取当前库名」那条证据里的 payload，别把后面的取表/取列 payload 当取库用；
+    // 历史证据可能混入取表/取列语句，优先选含 database() 的那条
+    if (stage === 'blind_extract' && /当前库名/.test(c) && m.blind_payload) {
+      const bp = String(m.blind_payload)
+      // 取表/取列 payload 里也有 database()（table_schema=database()），要排除 information_schema
+      const isDb = !/information_schema/i.test(bp)
+        && /database\(\)|current_database/i.test(bp)
+      const curIsDb = !/information_schema/i.test(blindDbPayload)
+        && /database\(\)|current_database/i.test(blindDbPayload)
+      if (!blindDbPayload || (!curIsDb && isDb)) {
+        blindDbPayload = bp
+      }
+    }
     // 轻量盲注提取实际使用的 payload
     if (!blindPayload && m.blind_payload) blindPayload = String(m.blind_payload)
     // 每个结果各自的取数 payload：挂在对应结果下面
@@ -453,15 +481,23 @@ const deepSummary = computed(() => {
 
   // 每个结果后面紧跟对应的 payload / sqlmap 命令，方便直接复现
   const realDb = dbName || schema
+  let usedBlindAsDb = false
   if (realDb) {
     lines.push(`数据库名：${realDb}`)
-    if (payloadDb) {
-      lines.push(`  └ 取库 Payload：${payloadDb}`)
-    } else if (dbSource && dbSource !== 'sqlmap') {
-      // 复用的/布尔对比提取的库名，不能冒充 sqlmap --current-db
-      lines.push('  └ 库名来源：布尔页面对比 / 历史复用')
-    } else {
-      if (dataPayload) lines.push(`  └ 取数 Payload：${dataPayload}`)
+    // 库名下面必须紧跟「取库 payload」，再标来源；不能因为来源是复用就把 payload 吞了
+    const dbPayload = payloadDb || dataPayload || blindDbPayload
+    if (dbPayload) lines.push(`  └ 取库 Payload：${dbPayload}`)
+    if (blindPayload && dbPayload === blindPayload) usedBlindAsDb = true
+    if (dbSource && dbSource !== 'sqlmap') {
+      // 复用的/布尔提取的库名，不能冒充 sqlmap --current-db
+      const src = dbViaSqlmapHistory
+        ? '历史复用（原始来源 sqlmap）'
+        : (blindExtractDb ? '布尔盲注逐字符提取' : '复用的历史结论')
+      lines.push(`  └ 库名来源：${src}`)
+      if (!dbPayload && extractExtra.length) {
+        lines.push(`  └ sqlmap 参数：${extractExtra.join(' ')}`)
+      }
+    } else if (!dbPayload) {
       if (extractExtra.length) lines.push(`  └ sqlmap 参数：${extractExtra.join(' ')}`)
       else if (extractQuery) lines.push(`  └ 取数语句：${extractQuery}`)
     }
@@ -469,24 +505,34 @@ const deepSummary = computed(() => {
   if (tables.length) {
     lines.push(`表：${tables.join(', ')}`)
     if (payloadTables) lines.push(`  └ 取表 Payload：${payloadTables}`)
-    if (tablesExtra.length) lines.push(`  └ 取表 sqlmap 参数：${tablesExtra.join(' ')}`)
+    // 已拿到自研盲注取表 payload 时，不再混入上一轮 sqlmap 的参数（会误导来源）
+    if (!payloadTables && tablesExtra.length) lines.push(`  └ 取表 Payload（sqlmap 参数）：${tablesExtra.join(' ')}`)
   }
   if (sample) {
     lines.push(`数据样本/flag：${sample}`)
     if (payloadFlag) lines.push(`  └ 取 flag Payload（逐字符示例）：${payloadFlag}`)
-    if (dumpExtra.length) lines.push(`  └ 脱裤 sqlmap 参数：${dumpExtra.join(' ')}`)
+    if (dumpExtra.length) lines.push(`  └ 脱裤 Payload（sqlmap 参数）：${dumpExtra.join(' ')}`)
   }
   if (partialSample && !sample) {
     lines.push(`数据样本/flag（部分，未完整，下次可续跑）：${partialSample}`)
     if (payloadFlag) lines.push(`  └ 取 flag Payload：${payloadFlag}`)
     lines.push('提示：再次点击「深入利用」将从断点续跑，不会从头提取')
   }
+  // 表枚举成功但 dump 没返回数据：明确标注，不能让人误以为脱裤完成
+  if (dumpTried && !dumpHasSample && !sample && !partialSample) {
+    lines.push('数据样本：未取到（dump 未返回数据，可再次「深入利用」重试）')
+    if (dumpExtra.length) lines.push(`  └ 脱裤 Payload（sqlmap 参数）：${dumpExtra.join(' ')}`)
+  }
 
   // 注入确认信息统一放最后，不打断“结果 → 对应 payload”
   if (payload) lines.push(`扫描确认 Payload：${payload}`)
-  if (blindConfirmPayload) lines.push(`盲注检测 Payload（非取数语句）：${blindConfirmPayload}`)
+  if (blindConfirmPayload) {
+    // sqlmap 的请求体形态会带 `Submit=&id=...` 前缀，展示时剥掉空参数
+    const cleaned = blindConfirmPayload.replace(/^(?:[^&=\s]+=&)+/, '')
+    lines.push(`盲注检测 Payload（非取数语句）：${cleaned}`)
+  }
   // 有分步 payload 时不再重复一条笼统的“盲注提取 Payload”
-  if (blindPayload && !payloadDb && !payloadTables && !payloadFlag) {
+  if (blindPayload && !usedBlindAsDb && !payloadDb && !payloadTables && !payloadFlag) {
     lines.push(`盲注提取 Payload：${blindPayload}`)
   }
   if (exploitPayload) lines.push(`利用 Payload：${exploitPayload}`)
@@ -777,6 +823,28 @@ const TYPE_LABEL = { sql_injection_boolean: 'SQL注入·布尔盲注', sql_injec
 function typeLabel(t) { return TYPE_LABEL[t] || t }
 function sevLabel(s) { return { critical: '严重', high: '高危', medium: '中危', low: '低危' }[s] || s }
 function sevTag(s) { return { critical: 'danger', high: 'danger', medium: 'warning', low: 'info' }[s] || 'info' }
+// 旧证据里的 params 是 Python 原始结构，展示时转成 `id(query), Submit(query)`
+function prettyEvContent(t) {
+  const s = String(t || '')
+  return s.replace(/params=(\[[\s\S]*?\])/g, (m, arr) => {
+    try {
+      // Python repr → JSON（单引号 / True/False/None）
+      const json = arr.replace(/'/g, '"')
+        .replace(/\bTrue\b/g, 'true')
+        .replace(/\bFalse\b/g, 'false')
+        .replace(/\bNone\b/g, 'null')
+      const list = JSON.parse(json)
+      if (!Array.isArray(list)) return m
+      const parts = list.map(p => (p && p.location)
+        ? `${p.name}(${p.location})`
+        : String((p && p.name) || p))
+      return 'params: ' + parts.join(', ')
+    } catch (e) {
+      return m
+    }
+  })
+}
+
 function stageLabel(s) {
   return {
     blind_skip: '盲注跳过（未提取）',

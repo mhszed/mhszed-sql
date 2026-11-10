@@ -132,10 +132,14 @@ def create_vulnerability(db: Session, *, task_id: int, endpoint: Endpoint,
         if chain:
             seq = _add_evidence(db, vuln.id, seq, "chain_info",
                                 f"链路[{chain.reconstruct_method}] conf={chain.confidence}: {chain.name}")
-    # 接口请求特征
+    # 接口请求特征（参数格式化成 id(query) 形式，不再落 Python 原始结构）
+    _params_txt = ", ".join(
+        (f"{(p or {}).get('name')}({(p or {}).get('location')})"
+         if (p or {}).get("location") else str((p or {}).get("name") or p))
+        for p in (endpoint.params or [])) or "（无）"
     seq = _add_evidence(db, vuln.id, seq, "request",
                         f"{endpoint.method} {endpoint.host}{endpoint.raw_path or endpoint.path}\n"
-                        f"params={endpoint.params}")
+                        f"params: {_params_txt}")
 
     db.commit()
     bus.publish("vuln", f"产出漏洞（待复核）: {title}", task_id=task_id, level="error")
