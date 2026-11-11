@@ -1987,6 +1987,13 @@ def _impact_report_tests():
               "    Parameter: q (GET)\n"
               "        Payload: category=&q=1%' AND 4500=4500 AND 'lGum%'='lGum")
           == "category=&q=1%' AND 4500=4500 AND 'lGum%'='lGum")
+    from sqlmap_adapter import runner as _runner_multi
+    _multi_out = ("[PAYLOAD] 1' AND CHAR_LENGTH(DATABASE())>9\n"
+                  "[INFO] retrieved: 9\n"
+                  "[PAYLOAD] 1' AND ORD(MID(DATABASE(),8,1))>105\n"
+                  "[INFO] retrieved: lab_admin\n")
+    check("多步取数取最后一条 payload（不是长度探测）",
+          (_runner_multi._extract_data_payload(_multi_out) or "").endswith(">105"))
     check("深挖会话恢复时补 payload 证据",
           "_payload_from_output" in inspect.getsource(de._run))
     check("初筛输出也兜底提取 Payload",

@@ -21,6 +21,29 @@ from app.services.safety import SafeHttpClient
 from sqlmap_adapter import runner
 
 
+def classify_sql_vectors(findings: dict | None, payload: str,
+                         output: str = "") -> tuple[bool, bool]:
+    """按 sqlmap 结构化判定归类注入技法，返回 (is_union, is_time)。
+
+    2026-11-11 某真实目标实测：不能按 payload 子串搜 "union" ——
+    sqlmap 布尔盲注的假分支会写成 `ELSE (SELECT a UNION SELECT b)`（故意让子查询
+    返回两行触发报错来区分真假），按子串会把 boolean-based blind 误标成
+    `sql_injection_union`。有 findings.parameters[].type 时以 sqlmap 判定为准；
+    findings 缺失（超时升级等）才退回 payload/输出启发式。
+    """
+    params = (findings or {}).get("parameters") or []
+    types = " ".join(str((p or {}).get("type") or "") for p in params).lower()
+    if types:
+        is_union = "union" in types
+        is_time = (not is_union) and ("time-based" in types)
+        return is_union, is_time
+    is_union = "union" in (payload or "").lower()
+    is_time = (not is_union) and (
+        "sleep(" in (payload or "").lower()
+        or "time-based" in (output or "").lower())
+    return is_union, is_time
+
+
 def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
              cfg: dict, allowed_hosts: set[str], stop_check) -> dict:
     """对给定接口列表执行流水线探测。返回统计。"""
@@ -116,11 +139,12 @@ def run_scan(db: Session, task_id: int, endpoints: list[Endpoint],
                             payload = _params[0].get("payload") or ""
                     if not payload:
                         payload = runner._extract_payload(extra.get("output") or "") or ""
-                    is_union = "union" in payload.lower() or bool(extra.get("pg_union"))
-                    # sqlmap 确认的时间盲注：payload 含 SLEEP 或输出写明 time-based
-                    _out_low = (extra.get("output") or "").lower()
-                    is_time = ("sleep(" in (payload or "").lower()
-                               or "time-based" in _out_low)
+                    # 技法归类优先用 sqlmap findings（parameters[].type）；
+                    # findings 缺失才退回 payload 启发式（见 classify_sql_vectors）。
+                    is_union, is_time = classify_sql_vectors(
+                        extra.get("findings"), payload, extra.get("output") or "")
+                    if extra.get("pg_union"):
+                        is_union, is_time = True, False
                     _vector = ("union" if is_union else
                                "time" if is_time else "boolean")
                     _vuln_type = ("sql_injection_union" if is_union else

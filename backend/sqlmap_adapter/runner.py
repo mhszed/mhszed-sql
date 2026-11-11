@@ -360,20 +360,25 @@ def _sanitize_extra_args(extra_args: list[str] | None) -> list[str]:
 
 @_serialized_per_host
 def _extract_data_payload(output: str) -> str | None:
-    """从 -v 3 输出里取最后一条真正用于取数的 [PAYLOAD]。
+    """从 -v 3 输出里取**最后一条真正用于取数**的 [PAYLOAD]。
 
     取数阶段输出形如：
         [PAYLOAD] 1' AND (SELECT ... IF(...,SLEEP(...),0) ...)
         [INFO] retrieved: root
-    取 `retrieved:` 前最后一条 [PAYLOAD]；没有 retrieved 时返回最后一条。
+
+    2026-11-11 修正（#49 实测）：--current-db 是**多步**提取——先探长度
+    （CHAR_LENGTH(DATABASE())）、再逐字符。旧实现遇到第一个 `retrieved:` 就返回，
+    拿到的是长度探测 payload，界面上被当成“取库 Payload”。
+    现在记录每个 `retrieved:` 前的最新 payload，取**最后一个**候选。
     """
     last = None
+    candidate = None
     for ln in (output or "").splitlines():
         if "[PAYLOAD]" in ln:
             last = ln.split("[PAYLOAD]", 1)[1].strip()
         elif "retrieved:" in ln.lower() and last:
-            return last
-    return last
+            candidate = last
+    return candidate or last
 
 
 def _exploit_produced(output: str) -> bool:
