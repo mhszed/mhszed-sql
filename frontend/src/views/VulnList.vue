@@ -213,7 +213,7 @@
         <el-radio value="dump" border>脱裤样本（最多 5 行，需二次确认）</el-radio>
       </el-radio-group>
       <el-checkbox v-model="deepBlind" style="margin-top: 10px">
-        盲注定向提取（默认关；开启才逐字符提取，库名 300s、表/脱裤各 300s 预算）
+        盲注定向提取（默认关；开启才逐字符提取，库名/表各 600s、脱裤 900s 预算，可在扫描配置调整）
       </el-checkbox>
       <div class="dim small" style="margin-top: 12px">
         执行过程与结果统一记录在「证据链」；点漏洞列表的「证据链」查看。

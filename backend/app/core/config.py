@@ -43,9 +43,15 @@ DEFAULT_SCAN_CONFIG = {
     },
     "engines": {"sqlmap_enabled": True, "ai_probe_enabled": True},
     "max_pipeline_rounds": 2,
-    # 深入利用整轮总预算（秒）：防止布尔盲注在限流目标上无限施压。
-    # 达到预算/连续连接失败都会主动停止。
-    "deep_total_budget_s": 900,
+    # 深入利用整轮总预算（秒）：防止布尔/时间盲注在限流目标上无限施压。
+    # 达到预算/连续连接失败都会主动停止。时间盲注逐字符 sleep，900s 只够读短值。
+    "deep_total_budget_s": 1800,
+    # 盲注分子任务硬预算（秒）：库名 / 表枚举 / 脱裤各一段，均可被总预算截断。
+    "deep_blind_db_budget_s": 600,
+    "deep_blind_tables_budget_s": 600,
+    "deep_blind_dump_budget_s": 900,
+    # sqlmap 盲注并行线程（时间盲注逐字符推断可并行；初筛仍固定 1 线程）。
+    "deep_sqlmap_threads": 4,
     # 轻量盲注提取当前库名（默认关闭）：实测会把 library 读成 lihrary、
     # challenges 读成 challdnges，误读会直接满足 goal=schema 并停止，
     # 产生错误结论。需要极速探测时再显式开启，并自行复核。

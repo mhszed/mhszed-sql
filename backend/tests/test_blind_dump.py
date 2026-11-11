@@ -79,7 +79,7 @@ def test_dump_flow():
         return {"status": "finished", "result_class": "exploit_ok",
                 "full_output": DUMP_OUT, "duration_ms": 200}
 
-    tables, table, sample, note = _run(db, fake)
+    tables, table, sample, note, partial = _run(db, fake)
     check("表枚举解析", "flag" in tables and "users" in tables, str(tables))
     check("优先 flag 表", table == "flag", f"table={table}")
     check("样本包含脱裤数据", "flag{local_lab}" in sample, sample[:80])
@@ -88,13 +88,14 @@ def test_dump_flow():
           and "--tables" in calls[0]["extra_args"]
           and calls[0]["timeout_s"] == 600)
     dump_extra = calls[1]["extra_args"]
-    check("脱裤用 --dump + --stop 5 + 300s",
+    check("脱裤用 --dump + --stop 5 + 900s",
           "--dump" in dump_extra and "-T" in dump_extra
           and dump_extra[dump_extra.index("-T") + 1] == "flag"
           and "--stop" in dump_extra
           and dump_extra[dump_extra.index("--stop") + 1] == "5"
-          and calls[1]["timeout_s"] == 300)
+          and calls[1]["timeout_s"] == 900)
     check("脱裤只读（is_write=False）", calls[1]["is_write"] is False)
+    check("完整样本时无部分结果", partial == "", repr(partial))
     db.close()
 
 
@@ -107,16 +108,39 @@ def test_no_tables_skips_dump():
         return {"status": "timeout", "result_class": "timeout",
                 "full_output": "", "duration_ms": 300}
 
-    tables, table, sample, note = _run(db, fake)
+    tables, table, sample, note, partial = _run(db, fake)
     check("表为空不继续脱裤", tables == [] and table is None and len(calls) == 1,
           f"calls={len(calls)}")
     check("失败留痕", "未取到" in note, note)
     db.close()
 
 
+def test_partial_kept_on_timeout():
+    """超时前 sqlmap 已打印 retrieved 片段 → 保留为部分结果。"""
+    db = _db()
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return {"status": "finished", "result_class": "exploit_ok",
+                    "full_output": TABLES_OUT, "duration_ms": 100}
+        return {"status": "timeout", "result_class": "timeout",
+                "full_output": ("[INFO] retrieved: flag{local_\n"
+                                "[INFO] retrieved: lab_partial}"),
+                "duration_ms": 900000}
+
+    tables, table, sample, note, partial = _run(db, fake)
+    check("超时无完整样本", sample == "", repr(sample))
+    check("超时保留部分结果", partial == "flag{local_lab_partial}", repr(partial))
+    check("部分结果写进备注", "部分结果" in note, note)
+    db.close()
+
+
 def main():
     test_dump_flow()
     test_no_tables_skips_dump()
+    test_partial_kept_on_timeout()
     print(f"\n通过 {len(passed)}，失败 {len(failed)}")
     return 0 if not failed else 1
 

@@ -398,7 +398,8 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
                out_dir_key: str | None = None,
                cookie: str | None = None,
                headers: str | None = None,
-               risk_override: int | None = None) -> dict:
+               risk_override: int | None = None,
+               threads: int = 1) -> dict:
     """执行一次 SQLMap 扫描/利用。返回 {status, result_class, dbms, output_tail, ...}。
 
     exploit_mode=True：已知可注，追加白名单 extra_args（--dbs/--tables/--dump…），
@@ -418,7 +419,10 @@ def run_sqlmap(*, job_id: int, url: str, method: str = "GET", data: str | None =
 
     args = ["--batch", "-u", url,
             "--output-dir", str(out_dir),
-            "--threads", "1", "--timeout", "15", "--retries", "3",
+            # 时间盲注逐字符推断可并行；默认仍 1（初筛不额外加压强），
+            # 深挖脱裤由调用方按 scan_config.deep_sqlmap_threads 显式放宽。
+            "--threads", str(max(1, int(threads))),
+            "--timeout", "15", "--retries", "3",
             "--delay", _SQLMAP_DELAY_S,
             # 部分靶场/站点对 sqlmap 默认 UA 直接丢连接；随机 UA 是常规做法
             "--random-agent"]
